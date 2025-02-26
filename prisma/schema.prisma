@@ -1,0 +1,53 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String    @id @default(uuid())
+  name      String
+  createdAt DateTime  @default(now())
+  rooms     Room[]    @relation("RoomPlayers")
+  hostRooms Room[]    @relation("RoomHost")
+  answers   Answer[]
+}
+
+model Room {
+  id            String    @id @default(uuid())
+  code          String    @unique
+  hostId        String
+  host          User      @relation("RoomHost", fields: [hostId], references: [id])
+  players       User[]    @relation("RoomPlayers")
+  currentRound  Int       @default(0)
+  status        String    @default("LOBBY") // LOBBY, QUESTION, ANSWERING, VOTING, RESULTS
+  categories    String[]  @default([]) // Store categories as an array of strings
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  questions     Question[]
+}
+
+model Question {
+  id          String    @id @default(uuid())
+  text        String
+  correctAnswer String
+  roomId      String
+  room        Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  roundNumber Int
+  answers     Answer[]
+  createdAt   DateTime  @default(now())
+}
+
+model Answer {
+  id          String    @id @default(uuid())
+  text        String
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  questionId  String
+  question    Question  @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  votes       Int       @default(0)
+  createdAt   DateTime  @default(now())
+} 
