@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
+  import { supabase } from '$lib/supabase';
   
   let roomCode = $page.params.code;
   let playerName = '';
@@ -27,6 +28,16 @@
   
   // Set up polling
   let pollingInterval;
+  let lastUpdate = Date.now();
+  const REFRESH_INTERVAL = 3000; // 3 seconds
+  
+  // Store the shuffled answers to maintain consistent order
+  let shuffledAnswerIds = [];
+  
+  // For real-time subscriptions
+  let roomSubscription;
+  let questionSubscription;
+  let answerSubscription;
   
   onMount(async () => {
     // Get player info from localStorage
@@ -62,8 +73,15 @@
       joinStatus = 'joined';
       console.log(`Successfully joined room ${roomCode}`);
       
-      // Start polling for game state
-      startPolling();
+      // Set up both realtime and polling
+      setupRealtimeSubscriptions();
+      
+      // Fallback polling
+      pollingInterval = setInterval(() => {
+        if (Date.now() - lastUpdate > REFRESH_INTERVAL) {
+          fetchGameState();
+        }
+      }, REFRESH_INTERVAL);
     } catch (error) {
       console.error('Error joining room:', error);
       joinStatus = 'error';
@@ -72,15 +90,91 @@
   });
   
   onDestroy(() => {
+    // Clean up all subscriptions
+    if (roomSubscription) roomSubscription.unsubscribe();
+    if (questionSubscription) questionSubscription.unsubscribe();
+    if (answerSubscription) answerSubscription.unsubscribe();
+    
     if (pollingInterval) {
       clearInterval(pollingInterval);
     }
   });
   
-  function startPolling() {
-    // Set up polling to check game state
-    pollingInterval = setInterval(fetchGameState, 2000);
-    fetchGameState(); // Initial fetch
+  function resetGameState() {
+    question = null;
+    userAnswer = '';
+    submittingAnswer = false;
+    answerSubmitted = false;
+    availableAnswers = [];
+    shuffledAnswerIds = [];
+    votingAnswer = null;
+    votingComplete = false;
+    correctAnswer = '';
+    results = [];
+  }
+  
+  function setupRealtimeSubscriptions() {
+    roomSubscription = supabase
+      .channel('room-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'Room',
+          filter: `code=eq.${roomCode}`
+        },
+        (payload) => {
+          console.log('Room updated:', payload);
+          
+          if (payload.new.status === 'ANSWERING' && roomStatus !== 'ANSWERING') {
+            console.log('New round detected, resetting game state');
+            resetGameState();
+          }
+          
+          roomStatus = payload.new.status;
+          
+          fetchGameState();
+        }
+      )
+      .subscribe();
+    
+    questionSubscription = supabase
+      .channel('question-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'Question',
+          filter: `roomId=in.(select id from Room where code='${roomCode}')`
+        },
+        (payload) => {
+          console.log('Question updated:', payload);
+          fetchGameState();
+        }
+      )
+      .subscribe();
+    
+    answerSubscription = supabase
+      .channel('answer-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'Answer'
+        },
+        (payload) => {
+          console.log('Answer updated:', payload);
+          if (question && payload.new.questionId === question.id) {
+            fetchGameState();
+          }
+        }
+      )
+      .subscribe();
+    
+    fetchGameState();
   }
   
   async function fetchGameState() {
@@ -93,11 +187,9 @@
       roomStatus = data.room.status;
       
       if (roomStatus === 'ANSWERING' || roomStatus === 'QUESTION') {
-        // Question phase - get the question
         if (data.currentQuestion) {
           question = data.currentQuestion;
           
-          // Check if player already submitted an answer
           const playerAnswer = data.answers.find(a => a.userId === playerId);
           if (playerAnswer) {
             userAnswer = playerAnswer.text;
@@ -108,42 +200,86 @@
         }
       } 
       else if (roomStatus === 'VOTING') {
-        // Voting phase - get all answers
         if (data.currentQuestion) {
           question = data.currentQuestion;
           correctAnswer = data.currentQuestion.correctAnswer;
           
-          // Get all answers except player's own
           const otherAnswers = data.answers.filter(a => a.userId !== playerId);
           
-          // Make sure to include the correct answer
-          availableAnswers = shuffleArray([
+          const aiAlternatives = data.currentQuestion?.alternatives || [];
+          
+          const alternativesAsAnswers = aiAlternatives.map((alt, index) => ({
+            id: `ai-alt-${index}`,
+            text: alt,
+            isAIAlternative: true
+          }));
+          
+          const allOptions = [
             ...otherAnswers,
+            ...alternativesAsAnswers,
             { 
               id: 'correct', 
               text: data.currentQuestion.correctAnswer,
               isCorrect: true
             }
-          ]);
+          ];
           
-          // Check if player already voted
-          votingComplete = false; // Reset when entering voting phase
+          if (shuffledAnswerIds.length === 0) {
+            const shuffled = shuffleArray([...allOptions]);
+            shuffledAnswerIds = shuffled.map(a => a.id);
+            
+            if (!shuffled.some(a => a.isCorrect)) {
+              const correctOption = { 
+                id: 'correct', 
+                text: data.currentQuestion.correctAnswer,
+                isCorrect: true
+              };
+              
+              const randomIndex = Math.floor(Math.random() * shuffled.length);
+              shuffled[randomIndex] = correctOption;
+              shuffledAnswerIds[randomIndex] = 'correct';
+            }
+            
+            availableAnswers = shuffled;
+          } else {
+            availableAnswers = shuffledAnswerIds.map(id => {
+              if (id === 'correct') {
+                return { 
+                  id: 'correct', 
+                  text: data.currentQuestion.correctAnswer,
+                  isCorrect: true
+                };
+              } else if (id.startsWith('ai-alt-')) {
+                const index = parseInt(id.split('-')[2]);
+                return {
+                  id: `ai-alt-${index}`,
+                  text: aiAlternatives[index],
+                  isAIAlternative: true
+                };
+              } else {
+                return otherAnswers.find(a => a.id === id) || {
+                  id,
+                  text: "Answer unavailable",
+                  userId: "unknown"
+                };
+              }
+            });
+          }
         }
       }
       else if (roomStatus === 'RESULTS') {
-        // Results phase
         if (data.currentQuestion) {
           question = data.currentQuestion;
           correctAnswer = data.currentQuestion.correctAnswer;
           results = data.answers;
           
-          // Calculate points if not already done
           if (!roundResults.includes(data.currentQuestion.id)) {
             roundResults.push(data.currentQuestion.id);
-            // We'll add point calculation later
           }
         }
       }
+      
+      lastUpdate = Date.now();
     } catch (error) {
       console.error('Error fetching game state:', error);
     }
@@ -185,6 +321,11 @@
     votingAnswer = answerId;
     
     try {
+      if (answerId === 'correct' || answerId.startsWith('ai-alt-')) {
+        votingComplete = true;
+        return;
+      }
+      
       const response = await fetch(`/api/rooms/${roomCode}/vote`, {
         method: 'POST',
         headers: {

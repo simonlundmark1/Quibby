@@ -15,6 +15,7 @@
     correctAnswer: string;
     roomId: string;
     roundNumber: number;
+    alternatives?: string[];
     [key: string]: any;
   }
 
@@ -41,32 +42,39 @@
   let currentRound = 0;
   
   // Set up real-time subscription
-  let subscription: any;
-  
-  // Fallback polling every 2 seconds
-  let pollingInterval: ReturnType<typeof setInterval>;
+  let roomSubscription: any;
   
   // Add some game stats
   let totalRounds = 0;
   let leaderboard = [];
   
+  // Add these to your existing variables
+  let pollingInterval;
+  let lastUpdate = Date.now();
+  const REFRESH_INTERVAL = 3000; // 3 seconds
+  
   onMount(async () => {
     // Load room data
     await fetchRoomData();
     
-    // Subscribe to room changes
-    setupRealtimeSubscription();
+    // Set up both realtime and polling as backup
+    setupRealtimeSubscriptions();
+    
+    // Fallback polling every 3 seconds
+    pollingInterval = setInterval(() => {
+      // Only poll if it's been more than REFRESH_INTERVAL since last update
+      if (Date.now() - lastUpdate > REFRESH_INTERVAL) {
+        fetchRoomData();
+      }
+    }, REFRESH_INTERVAL);
     
     // Set up Chromecast
     setupChromecast();
-    
-    // Fallback polling every 2 seconds
-    pollingInterval = setInterval(fetchRoomData, 2000);
   });
   
   onDestroy(() => {
-    if (subscription) {
-      subscription.unsubscribe();
+    if (roomSubscription) {
+      roomSubscription.unsubscribe();
     }
     
     if (pollingInterval) {
@@ -141,6 +149,9 @@
         // Sort by score
         leaderboard.sort((a, b) => b.score - a.score);
       }
+      
+      // After fetching data successfully:
+      lastUpdate = Date.now();
     } catch (error) {
       console.error('Error fetching room data:', error);
     }
@@ -173,18 +184,20 @@
     }
   }
   
-  function setupRealtimeSubscription() {
+  function setupRealtimeSubscriptions() {
     console.log('Setting up realtime subscription for room:', roomCode);
     
-    subscription = supabase
-      .channel('room-updates')
-      .on('postgres_changes', { 
-        event: '*', 
-        schema: 'public', 
+    roomSubscription = supabase
+      .channel('room-changes')
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
         table: 'Room',
         filter: `code=eq.${roomCode}`
       }, (payload) => {
-        console.log('Room update received:', payload);
+        console.log('Room update received via realtime:', payload);
+        roomStatus = payload.new.status;
+        lastUpdate = Date.now(); // Mark that we received an update
         fetchRoomData();
       })
       .on('postgres_changes', {
@@ -199,13 +212,26 @@
         event: '*',
         schema: 'public',
         table: 'Question'
-      }, fetchCurrentQuestion)
+      }, (payload) => {
+        console.log('Question updated:', payload);
+        fetchRoomData();
+      })
       .on('postgres_changes', {
         event: '*',
         schema: 'public',
         table: 'Answer'
-      }, fetchAnswers)
-      .subscribe();
+      }, (payload) => {
+        console.log('Answer updated:', payload);
+        if (currentQuestion && payload.new.questionId === currentQuestion.id) {
+          fetchRoomData();
+        }
+      })
+      .subscribe((status) => {
+        console.log('Supabase subscription status:', status);
+      });
+    
+    // Initial fetch
+    fetchRoomData();
   }
   
   async function startGame() {
@@ -252,6 +278,71 @@
     await fetch(`/api/rooms/${roomCode}/start-voting`, {
       method: 'POST'
     });
+  }
+  
+  // Check if all players have voted
+  function hasEveryoneVoted() {
+    // If we don't have players or answers data yet, return false
+    if (!players || players.length === 0 || !answers) return false;
+    
+    // Count votes
+    const totalVotes = answers.reduce((sum, answer) => sum + (answer.votes || 0), 0);
+    
+    // Each player gets one vote, so total votes should equal player count
+    // Minus 1 because the host doesn't vote
+    return totalVotes >= (players.length - 1);
+  }
+  
+  // Function to show results
+  async function showResults() {
+    try {
+      const response = await fetch(`/api/rooms/${roomCode}/show-results`, {
+        method: 'POST'
+      });
+      
+      if (!response.ok) {
+        console.error('Failed to show results');
+      }
+    } catch (error) {
+      console.error('Error showing results:', error);
+    }
+  }
+  
+  async function startNextRound() {
+    try {
+      // Reset question-related state
+      currentQuestion = null;
+      answers = [];
+      shuffledAnswerIds = [];
+      
+      const response = await fetch(`/api/rooms/${roomCode}/start`, {
+        method: 'POST'
+      });
+      
+      if (!response.ok) {
+        console.error('Failed to start next round');
+      } else {
+        // Force an immediate fetch of the new data
+        console.log('Next round started, fetching new data...');
+        await fetchRoomData();
+      }
+    } catch (error) {
+      console.error('Error starting next round:', error);
+    }
+  }
+  
+  async function endGame() {
+    try {
+      const response = await fetch(`/api/rooms/${roomCode}/end`, {
+        method: 'POST'
+      });
+      
+      if (!response.ok) {
+        console.error('Failed to end game');
+      }
+    } catch (error) {
+      console.error('Error ending game:', error);
+    }
   }
 </script>
 
@@ -360,27 +451,54 @@
     {:else if roomStatus === 'VOTING' && currentQuestion}
       <div class="bg-white rounded-xl shadow-lg overflow-hidden mb-8">
         <div class="bg-blue-600 text-white p-4 text-center text-xl font-bold">
-          PLAYERS ARE VOTING
+          VOTING IN PROGRESS
         </div>
         <div class="p-8">
           <div class="bg-yellow-100 border-2 border-yellow-400 rounded-lg p-4 mb-6">
             <p class="text-center text-xl font-bold text-blue-900">{currentQuestion.text}</p>
-            <p class="text-center text-green-700 font-bold mt-2">Answer: {currentQuestion.correctAnswer}</p>
           </div>
           
           <div class="mb-6">
             <h3 class="text-lg font-bold mb-3 text-blue-800">All Answers:</h3>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {#each [...answers, { text: currentQuestion.correctAnswer, isCorrect: true }] as answer, index}
+              {#each [
+                ...answers.map(answer => ({
+                  id: answer.id,
+                  text: answer.text,
+                  userId: answer.userId,
+                  user: answer.user,
+                  votes: answer.votes,
+                  isPlayerAnswer: true
+                })),
+                ...(currentQuestion?.alternatives || []).map((alt, i) => ({ 
+                  text: alt, 
+                  isAIAlternative: true, 
+                  id: `ai-alt-${i}` 
+                })),
+                { 
+                  id: 'correct', 
+                  text: currentQuestion.correctAnswer, 
+                  isCorrect: true,
+                  isRevealed: roomStatus === 'RESULTS' // Only reveal in results phase
+                }
+              ] as answer, index}
                 <div class="bg-blue-100 p-4 rounded-lg text-center border-2"
-                  class:border-green-500={answer.isCorrect}
-                  class:border-blue-300={!answer.isCorrect}>
+                  class:border-green-500={answer.isCorrect && roomStatus === 'RESULTS'}
+                  class:border-yellow-400={answer.isAIAlternative}
+                  class:border-blue-300={answer.isPlayerAnswer || (answer.isCorrect && roomStatus !== 'RESULTS')}>
                   <div class="inline-block w-8 h-8 bg-blue-600 text-white rounded-full text-center font-bold leading-8 mb-2">
                     {String.fromCharCode(65 + index)}
                   </div>
                   <div class="font-bold text-lg text-blue-800">{answer.text}</div>
-                  {#if answer.isCorrect}
+                  {#if answer.isCorrect && roomStatus === 'RESULTS'}
                     <div class="text-green-600 font-bold mt-1">TRUTH!</div>
+                  {:else if answer.isAIAlternative && roomStatus === 'RESULTS'}
+                    <div class="text-yellow-600 font-bold mt-1">AI ALTERNATIVE</div>
+                  {:else if answer.isPlayerAnswer && answer.user}
+                    <div class="text-purple-600 mt-1">{answer.user.name}'s answer</div>
+                    {#if roomStatus === 'RESULTS'}
+                      <div class="text-blue-600 font-bold mt-1">{answer.votes} votes</div>
+                    {/if}
                   {/if}
                 </div>
               {/each}
@@ -388,9 +506,18 @@
           </div>
           
           <div class="flex justify-center">
-            <div class="animate-pulse text-blue-800 font-bold">
-              Waiting for players to vote...
-            </div>
+            {#if hasEveryoneVoted()}
+              <button 
+                on:click={showResults}
+                class="mt-6 bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg text-xl transition-colors"
+              >
+                SHOW RESULTS
+              </button>
+            {:else}
+              <div class="animate-pulse text-blue-800 font-bold">
+                Waiting for players to vote...
+              </div>
+            {/if}
           </div>
         </div>
       </div>
@@ -446,12 +573,21 @@
             </div>
           {/if}
           
-          <button 
-            on:click={startGame}
-            class="w-full bg-blue-600 text-white py-3 px-6 rounded-md text-xl font-bold hover:bg-blue-700 transition-colors transform hover:scale-105 transition-transform"
-          >
-            NEXT ROUND
-          </button>
+          <div class="flex justify-center space-x-4 mt-8">
+            <button 
+              on:click={startNextRound}
+              class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg transition-colors"
+            >
+              NEXT ROUND
+            </button>
+            
+            <button 
+              on:click={endGame}
+              class="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg transition-colors"
+            >
+              END GAME
+            </button>
+          </div>
         </div>
       </div>
     {/if}

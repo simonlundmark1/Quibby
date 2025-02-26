@@ -31,14 +31,15 @@ model Room {
 }
 
 model Question {
-  id          String    @id @default(uuid())
-  text        String
+  id            String    @id @default(uuid())
+  text          String
   correctAnswer String
-  roomId      String
-  room        Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  roundNumber Int
-  answers     Answer[]
-  createdAt   DateTime  @default(now())
+  alternatives  String[]  @default([])  // Store AI-generated alternative answers
+  roomId        String
+  room          Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  roundNumber   Int
+  answers       Answer[]
+  createdAt     DateTime  @default(now())
 }
 
 model Answer {
