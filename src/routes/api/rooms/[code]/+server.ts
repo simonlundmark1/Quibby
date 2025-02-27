@@ -24,7 +24,9 @@ export async function GET({ params }) {
         players: true,
         questions: {
           where: {
-            roundNumber: roomData.currentRound
+            roundNumber: {
+              equals: roomData.currentRound
+            }
           },
           include: {
             answers: {
@@ -49,35 +51,87 @@ export async function GET({ params }) {
     console.log(`Room found: ${room.id}, status: ${room.status}, players: ${room.players.length}`);
     console.log(`Room players:`, room.players.map(p => ({ id: p.id, name: p.name })));
     
-    // Prepare the current question
-    let currentQuestion = room.questions[0] || null;
+    // Get current question (most recent for current round)
+    const currentQuestion = room.questions[0] || null;
+    
+    // Get answers for current question
+    const answers = currentQuestion ? currentQuestion.answers : [];
     
     // Check for alternatives in the global store as a fallback
     if (currentQuestion && !currentQuestion.alternatives && 
         global.questionAlternatives && 
         global.questionAlternatives[currentQuestion.id]) {
-      currentQuestion = {
+      // Instead of reassigning to currentQuestion, create an updated copy
+      let updatedQuestion = {
         ...currentQuestion,
         alternatives: global.questionAlternatives[currentQuestion.id]
       };
+      
+      // Use the updated question in the response
+      return json({
+        room: {
+          id: room.id,
+          code: room.code,
+          status: room.status,
+          currentRound: room.currentRound,
+          categories: room.categories,
+          createdAt: room.createdAt
+        }, 
+        players: room.players.map(player => ({
+          id: player.id,
+          name: player.name
+        })),
+        playerCount: room.players.length,
+        currentQuestion: updatedQuestion ? {
+          id: updatedQuestion.id,
+          text: updatedQuestion.text,
+          correctAnswer: updatedQuestion.correctAnswer,
+          alternatives: updatedQuestion.alternatives || [],
+          roomId: updatedQuestion.roomId,
+          roundNumber: updatedQuestion.roundNumber
+        } : null,
+        answers: answers.map(answer => ({
+          id: answer.id,
+          text: answer.text,
+          userId: answer.userId,
+          questionId: answer.questionId,
+          votes: answer.votes || 0,
+          user: answer.user
+        }))
+      });
     }
     
-    // Always return a response
-    return json({ 
+    // Always return a response - format data properly for host compatibility
+    return json({
       room: {
         id: room.id,
         code: room.code,
         status: room.status,
         currentRound: room.currentRound,
-        categories: room.categories
+        categories: room.categories,
+        createdAt: room.createdAt
       }, 
       players: room.players.map(player => ({
         id: player.id,
         name: player.name
       })),
       playerCount: room.players.length,
-      currentQuestion: currentQuestion,
-      answers: (room.questions[0]?.answers || [])
+      currentQuestion: currentQuestion ? {
+        id: currentQuestion.id,
+        text: currentQuestion.text,
+        correctAnswer: currentQuestion.correctAnswer,
+        alternatives: currentQuestion.alternatives || [],
+        roomId: currentQuestion.roomId,
+        roundNumber: currentQuestion.roundNumber
+      } : null,
+      answers: answers.map(answer => ({
+        id: answer.id,
+        text: answer.text,
+        userId: answer.userId,
+        questionId: answer.questionId,
+        votes: answer.votes || 0,
+        user: answer.user
+      }))
     });
     
   } catch (error) {

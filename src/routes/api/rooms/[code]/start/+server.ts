@@ -12,63 +12,64 @@ export async function POST({ params }) {
   const { code } = params;
   
   try {
-    console.log(`Starting game for room: ${code}`);
+    console.log(`Starting new round for room: ${code}`);
     
-    // Find room
+    // Get current room data
     const room = await prisma.room.findUnique({
       where: { code },
-      include: { players: true }
+      include: {
+        players: true
+      }
     });
     
     if (!room) {
-      console.error(`Room not found: ${code}`);
       return json({ error: 'Room not found' }, { status: 404 });
     }
     
-    // Ensure there are enough players
-    if (room.players.length < 2) {
-      console.error(`Not enough players to start game: ${room.players.length}`);
-      return json({ error: 'Need at least 2 players to start' }, { status: 400 });
-    }
+    // Increment the round number
+    const newRound = room.currentRound + 1;
     
-    console.log(`Generating question for room: ${code} with categories:`, room.categories);
-    
-    // Generate question with categories and alternatives
-    const { question, answer, alternatives } = await generateQuestion(room.categories);
+    // Generate a new question
+    const category = room.categories ? room.categories[Math.floor(Math.random() * room.categories.length)] : 'general';
+    const { question, answer, alternatives } = await generateQuestion(category);
     
     console.log(`Question generated: "${question}" (Answer: "${answer}")`);
     console.log(`Alternatives:`, alternatives);
     
-    // Save question to database with alternatives (now that the database is updated)
-    const newQuestion = await prisma.question.create({
+    // Save the question
+    const savedQuestion = await prisma.question.create({
       data: {
         text: question,
         correctAnswer: answer,
-        alternatives: alternatives,
+        alternatives: alternatives || [],
         roomId: room.id,
-        roundNumber: room.currentRound + 1
+        roundNumber: newRound
       }
     });
     
-    console.log(`Question saved with ID: ${newQuestion.id}`);
+    console.log(`Question saved with ID: ${savedQuestion.id}`);
     
     // Save question ID and its alternatives for later use
-    global.questionAlternatives[newQuestion.id] = alternatives;
+    global.questionAlternatives[savedQuestion.id] = alternatives;
     
-    // Update room status
+    // Update room status to ANSWERING with new round number
     await prisma.room.update({
       where: { code },
       data: {
         status: 'ANSWERING',
-        currentRound: { increment: 1 }
+        currentRound: newRound
       }
     });
     
-    console.log(`Room ${code} status updated to ANSWERING, round: ${room.currentRound + 1}`);
+    console.log(`Room ${code} status updated to ANSWERING, round: ${newRound}`);
     
-    return json({ success: true });
+    return json({ 
+      success: true,
+      newRound,
+      questionId: savedQuestion.id 
+    });
   } catch (error) {
-    console.error('Error starting game:', error);
-    return json({ error: 'Failed to start game' }, { status: 500 });
+    console.error('Error starting new round:', error);
+    return json({ error: 'Failed to start new round' }, { status: 500 });
   }
 } 

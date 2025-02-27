@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
   import { supabase } from '$lib/supabase';
+  import { browser } from '$app/environment';
   
   let roomCode = $page.params.code;
   let playerName = '';
@@ -38,6 +39,16 @@
   let roomSubscription;
   let questionSubscription;
   let answerSubscription;
+  
+  // Add these variables to your existing state
+  let hasVotedForCurrentQuestion = false;
+  let votedAnswerId = '';
+  
+  // Add this variable to your existing state
+  let playerAnswerId = null;
+  
+  // Add a variable to track the current round
+  let currentRound = 0;
   
   onMount(async () => {
     // Get player info from localStorage
@@ -87,6 +98,9 @@
       joinStatus = 'error';
       errorMessage = error.message || 'Unable to join room';
     }
+    
+    // Call this when loading the question
+    checkLocalVoteStatus();
   });
   
   onDestroy(() => {
@@ -184,6 +198,14 @@
       
       if (data.error) return;
       
+      // Check if round has changed, if so reset state
+      if (data.room.currentRound !== currentRound && currentRound !== 0) {
+        console.log(`Round changed from ${currentRound} to ${data.room.currentRound}, resetting state`);
+        resetRoundState();
+      }
+      
+      // Update current round
+      currentRound = data.room.currentRound;
       roomStatus = data.room.status;
       
       if (roomStatus === 'ANSWERING' || roomStatus === 'QUESTION') {
@@ -265,6 +287,19 @@
               }
             });
           }
+          
+          // Add check for existing vote in voting phase
+          const voteResponse = await fetch(`/api/rooms/${roomCode}/player-vote?userId=${playerId}`);
+          if (voteResponse.ok) {
+            const voteData = await voteResponse.json();
+            if (voteData.hasVoted) {
+              votingComplete = true;
+              votingAnswer = voteData.answerId;
+            } else {
+              votingComplete = false;
+              votingAnswer = null;
+            }
+          }
         }
       }
       else if (roomStatus === 'RESULTS') {
@@ -279,53 +314,123 @@
         }
       }
       
+      // After processing answers, track which one belongs to this player
+      if (data.answers && Array.isArray(data.answers)) {
+        playerAnswerId = data.answers.find(a => a.userId === playerId)?.id || null;
+      }
+      
       lastUpdate = Date.now();
     } catch (error) {
       console.error('Error fetching game state:', error);
     }
   }
   
-  async function submitAnswer() {
-    if (!userAnswer.trim() || submittingAnswer) return;
+  // Add local storage for answers, similar to votes
+  function checkLocalAnswerStatus() {
+    if (!browser || !question?.id || !playerId) return false;
     
-    submittingAnswer = true;
+    const answerKey = `answer_${roomCode}_${question.id}_${playerId}`;
+    const savedAnswer = localStorage.getItem(answerKey);
+    
+    if (savedAnswer) {
+      userAnswer = savedAnswer;
+      answerSubmitted = true;
+      return true;
+    }
+    
+    return false;
+  }
+  
+  function saveAnswerLocally(answer) {
+    if (!browser || !question?.id || !playerId) return;
+    
+    const answerKey = `answer_${roomCode}_${question.id}_${playerId}`;
+    localStorage.setItem(answerKey, answer);
+  }
+  
+  // Update the submitAnswer function
+  async function submitAnswer() {
+    if (!userAnswer.trim() || submittingAnswer || answerSubmitted) return;
     
     try {
-      const response = await fetch(`/api/rooms/${roomCode}/submit-answer`, {
+      submittingAnswer = true;
+      
+      if (!question || !question.id) {
+        throw new Error('No active question to answer');
+      }
+      
+      console.log(`Submitting answer "${userAnswer}" for question ${question.id}`);
+      
+      const response = await fetch(`/api/rooms/${roomCode}/answer`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
           userId: playerId,
-          answer: userAnswer
+          answer: userAnswer,
+          questionId: question.id
         })
       });
       
       if (!response.ok) {
         const error = await response.json();
+        console.error('Server returned error:', error);
         throw new Error(error.error || 'Failed to submit answer');
       }
       
+      const result = await response.json();
+      console.log('Answer submitted successfully:', result);
+      
       answerSubmitted = true;
+      saveAnswerLocally(userAnswer);
+      
     } catch (error) {
       console.error('Error submitting answer:', error);
+      alert('Failed to submit your answer. Please try again.');
     } finally {
       submittingAnswer = false;
     }
   }
   
+  // Function to check if user has already voted for this question
+  function checkLocalVoteStatus() {
+    if (!browser || !question?.id || !playerId) return false;
+    
+    // Include round number in the key to make it round-specific
+    const voteKey = `vote_${roomCode}_${question.id}_${playerId}_round${question.roundNumber}`;
+    const savedVote = localStorage.getItem(voteKey);
+    
+    if (savedVote) {
+      hasVotedForCurrentQuestion = true;
+      votedAnswerId = savedVote;
+      return true;
+    }
+    
+    hasVotedForCurrentQuestion = false;
+    votedAnswerId = '';
+    return false;
+  }
+  
+  // Update saveVoteLocally function
+  function saveVoteLocally(answerId) {
+    if (!browser || !question?.id || !playerId) return;
+    
+    // Include round number in the key to make it round-specific
+    const voteKey = `vote_${roomCode}_${question.id}_${playerId}_round${question.roundNumber}`;
+    localStorage.setItem(voteKey, answerId);
+  }
+  
+  // Modify your existing submitVote function
   async function submitVote(answerId) {
-    if (votingComplete) return;
+    // Check if already voted for this question
+    if (hasVotedForCurrentQuestion) {
+      console.log('Already voted for this question');
+      return;
+    }
     
-    votingAnswer = answerId;
-    
+    console.log(`Submitting vote for answer ${answerId}`);
     try {
-      if (answerId === 'correct' || answerId.startsWith('ai-alt-')) {
-        votingComplete = true;
-        return;
-      }
-      
       const response = await fetch(`/api/rooms/${roomCode}/vote`, {
         method: 'POST',
         headers: {
@@ -338,14 +443,19 @@
       });
       
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to submit vote');
+        const errorData = await response.json();
+        console.error('Server returned error:', errorData);
+        throw new Error(errorData.error || 'Failed to process vote');
       }
       
+      // Update local state to prevent multiple votes
       votingComplete = true;
+      votingAnswer = answerId;
+      saveVoteLocally(answerId);
+      
+      console.log('Vote submitted successfully!');
     } catch (error) {
       console.error('Error submitting vote:', error);
-      votingAnswer = null;
     }
   }
   
@@ -356,6 +466,37 @@
       [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
     }
     return newArray;
+  }
+  
+  // Update your onMount or fetchGameState to check for local answer
+  $: if (question?.id && roomStatus === 'ANSWERING') {
+    checkLocalAnswerStatus();
+  }
+  
+  // Add this function to your script
+  function isOwnAnswer(answerId) {
+    // For player answers, check if it's their own
+    // This assumes you have a mapping of answer IDs to user IDs
+    if (answerId && playerAnswerId === answerId) {
+      return true;
+    }
+    return false;
+  }
+  
+  // Add a function to reset game state between rounds
+  function resetRoundState() {
+    // Reset voting state
+    hasVotedForCurrentQuestion = false;
+    votedAnswerId = '';
+    votingComplete = false;
+    
+    // Reset answer state
+    answerSubmitted = false;
+    userAnswer = '';
+    
+    // Reset UI state
+    availableAnswers = [];
+    shuffledAnswerIds = [];
   }
 </script>
 
@@ -420,7 +561,7 @@
     {:else if (roomStatus === 'ANSWERING' || roomStatus === 'QUESTION') && question}
       <div class="bg-white rounded-xl shadow-lg overflow-hidden">
         <div class="bg-blue-600 text-white p-4 text-center text-xl font-bold">
-          {answerSubmitted ? 'WAITING FOR OTHERS' : 'YOUR TURN TO ANSWER'}
+          YOUR ANSWER
         </div>
         <div class="p-6">
           <div class="bg-yellow-100 border-2 border-yellow-400 rounded-lg p-4 mb-6">
@@ -428,32 +569,31 @@
           </div>
           
           {#if !answerSubmitted}
-            <p class="text-sm text-gray-600 mb-2">Enter your most convincing bluff answer:</p>
-            <div class="mb-4">
-              <input
-                type="text"
+            <form on:submit|preventDefault={submitAnswer} class="mb-4">
+              <input 
+                type="text" 
                 bind:value={userAnswer}
-                class="w-full border-2 border-blue-300 rounded-lg p-3 text-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Your convincing answer..."
+                placeholder="Type your answer here..." 
+                class="w-full p-3 border-2 border-blue-300 rounded-lg text-blue-800 mb-4"
+                disabled={submittingAnswer}
               />
-            </div>
-            
-            <button 
-              on:click={submitAnswer}
-              disabled={!userAnswer.trim() || submittingAnswer}
-              class="w-full bg-blue-600 text-white py-3 px-4 rounded-md font-bold transition-colors"
-              class:bg-blue-400={!userAnswer.trim() || submittingAnswer}
-              class:opacity-70={!userAnswer.trim() || submittingAnswer}
-            >
-              {submittingAnswer ? 'SUBMITTING...' : 'SUBMIT ANSWER'}
-            </button>
+              <button 
+                type="submit"
+                class="w-full bg-blue-600 text-white py-3 px-4 rounded-md font-bold"
+                class:opacity-50={submittingAnswer || !userAnswer.trim()}
+                disabled={submittingAnswer || !userAnswer.trim()}
+              >
+                {submittingAnswer ? 'Submitting...' : 'Submit Answer'}
+              </button>
+            </form>
           {:else}
-            <div class="bg-green-100 border-2 border-green-400 rounded-lg p-4 mb-4 text-center">
-              <p class="text-green-700 font-bold">Your answer submitted:</p>
-              <p class="text-lg font-bold text-blue-800">{userAnswer}</p>
+            <div class="bg-green-100 border-2 border-green-500 rounded-lg p-4 mb-6">
+              <p class="text-green-800 text-center font-bold">Your answer has been submitted!</p>
+              <p class="text-center text-blue-800 mt-2 font-medium">You answered: <span class="font-bold">{userAnswer}</span></p>
             </div>
-            
-            <p class="text-center text-gray-600">Waiting for other players to answer...</p>
+            <p class="text-center text-gray-600">
+              Waiting for other players to answer...
+            </p>
             <div class="flex justify-center space-x-2 mt-4">
               <div class="w-4 h-4 bg-blue-600 rounded-full animate-bounce" style="animation-delay: 0ms"></div>
               <div class="w-4 h-4 bg-blue-600 rounded-full animate-bounce" style="animation-delay: 150ms"></div>
@@ -475,18 +615,26 @@
           </div>
           
           {#if !votingComplete}
-            <p class="text-sm text-gray-600 mb-3">Select which answer you think is correct:</p>
-            <div class="space-y-3">
-              {#each availableAnswers as answer, index}
+            <div class="space-y-4">
+              {#each availableAnswers as answer, i}
                 <button 
                   on:click={() => submitVote(answer.id)}
-                  class="w-full flex items-center bg-indigo-100 py-3 px-4 rounded-lg hover:bg-indigo-200 transition-colors"
-                  class:bg-indigo-200={votingAnswer === answer.id}
+                  class="w-full p-4 bg-blue-100 rounded-lg text-left border-2"
+                  class:border-blue-300={!hasVotedForCurrentQuestion}
+                  class:border-green-500={hasVotedForCurrentQuestion && votedAnswerId === answer.id}
+                  class:border-gray-300={hasVotedForCurrentQuestion && votedAnswerId !== answer.id}
+                  class:opacity-50={hasVotedForCurrentQuestion || isOwnAnswer(answer.id)}
+                  disabled={hasVotedForCurrentQuestion || isOwnAnswer(answer.id)}
                 >
-                  <span class="flex-shrink-0 inline-block w-8 h-8 bg-blue-600 text-white rounded-full text-center font-bold leading-8 mr-3">
-                    {String.fromCharCode(65 + index)}
-                  </span>
-                  <span class="text-blue-900 font-medium text-lg">{answer.text}</span>
+                  <div class="flex items-center">
+                    <div class="w-8 h-8 bg-blue-600 text-white rounded-full flex items-center justify-center font-bold mr-3">
+                      {String.fromCharCode(65 + i)}
+                    </div>
+                    <span class="font-medium text-blue-800">{answer.text}</span>
+                    {#if isOwnAnswer(answer.id)}
+                      <span class="ml-2 text-purple-600 text-sm">(Your answer)</span>
+                    {/if}
+                  </div>
                 </button>
               {/each}
             </div>

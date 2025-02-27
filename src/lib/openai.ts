@@ -1,78 +1,65 @@
 import OpenAI from 'openai';
+import { OPENAI_API_KEY } from '$env/static/private';
 
+// Initialize OpenAI client with the API key
 const openai = new OpenAI({
-  apiKey: import.meta.env.VITE_OPENAI_KEY
+  apiKey: OPENAI_API_KEY,
 });
 
-export async function generateQuestion(categories = []) {
+export async function generateQuestionFromOpenAI(category = 'general') {
   try {
-    const categoryText = categories.length > 0 
-      ? `about ${categories.join(', ')}` 
-      : 'about any general knowledge topic';
+    console.log(`Generating question from OpenAI for category: ${category}`);
     
-    const prompt = `
-Generate a trivia question ${categoryText}. The question should be challenging but have a definite correct answer.
-The answer should be concise (preferably one word or a short phrase).
+    const prompt = `Generate a fun and interesting trivia question about ${category} with exactly one correct answer. Include three plausible but incorrect alternatives. The question should have a playful or misleading tone, similar to a bluff in a quiz game, but do not use the word "fibbage" or "correct" anywhere in the text. The question should be in the style of the game fibbage.
+    
+Format your response as valid JSON with these fields:
+- question: a single trivia question
+- answer: the single correct answer
+- alternatives: an array of three distinct incorrect answers
 
-Also generate 3 plausible but incorrect alternative answers that players might believe.
+Do not wrap your response in code fences or backticks. Output valid JSON only.
 
-Provide the output in this format:
-Question: [your question here]
-CorrectAnswer: [the correct answer here]
-Alternative1: [plausible wrong answer 1]
-Alternative2: [plausible wrong answer 2]
-Alternative3: [plausible wrong answer 3]
 
-Make sure the correct answer is specific and definitive - never say "No answer" or similar.
-Each alternative should be plausible enough that someone might think it's correct.
-`;
+Make sure the correct answer does not appear among the incorrect alternatives. Make the question entertaining but avoid explicit, offensive, or overly specialized content.`;
 
-    const response = await openai.completions.create({
-      model: "gpt-3.5-turbo-instruct",
-      prompt,
-      max_tokens: 250,
-      temperature: 0.7,
+    // Use GPT-4 to generate a question
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o", // Use GPT-4 for better questions
+      messages: [
+        {
+          role: "system",
+          content: "You are a trivia question generator that creates challenging but fair questions with a clear single correct answer. The question should be in the style of the game fibbage."
+        },
+        {
+          role: "user",
+          content: prompt
+        }
+      ],
+      temperature: 0.8,
+      max_tokens: 350,
     });
-
-    const text = response.choices[0].text.trim();
     
-    // Parse the response
-    const questionMatch = text.match(/Question: (.*)/);
-    const correctAnswerMatch = text.match(/CorrectAnswer: (.*)/);
-    const alt1Match = text.match(/Alternative1: (.*)/);
-    const alt2Match = text.match(/Alternative2: (.*)/);
-    const alt3Match = text.match(/Alternative3: (.*)/);
+    console.log('OpenAI response:', response.choices[0]?.message?.content);
     
-    if (!questionMatch || !correctAnswerMatch) {
-      console.error('Failed to parse question or answer from response:', text);
-      return generateFallbackQuestion();
-    }
-    
-    const question = questionMatch[1].trim();
-    const correctAnswer = correctAnswerMatch[1].trim();
-    
-    // Get alternatives or provide empty array if parsing fails
-    const alternatives = [
-      alt1Match ? alt1Match[1].trim() : null,
-      alt2Match ? alt2Match[1].trim() : null,
-      alt3Match ? alt3Match[1].trim() : null
-    ].filter(Boolean);
-    
-    // Verify we got a real answer, not "No answer" or similar
-    if (correctAnswer.toLowerCase().includes('no answer') || correctAnswer.length < 2) {
-      console.log('Got invalid answer, regenerating:', correctAnswer);
-      return generateFallbackQuestion();
-    }
+    // Parse the response as JSON
+    const content = response.choices[0]?.message?.content || '';
+    const parsedResponse = JSON.parse(content);
     
     return {
-      question,
-      answer: correctAnswer,
-      alternatives: alternatives
+      question: parsedResponse.question,
+      answer: parsedResponse.answer,
+      alternatives: parsedResponse.alternatives
     };
   } catch (error) {
-    console.error('Error generating question:', error);
+    console.error('Error generating question with OpenAI:', error);
+    
+    // Return a fallback question if OpenAI fails
     return generateFallbackQuestion();
   }
+}
+
+export async function generateQuestion(category = 'general') {
+  return generateQuestionFromOpenAI(category);
 }
 
 // Fallback questions in case OpenAI fails
