@@ -51,7 +51,9 @@
       if (data.roomCode) {
         localStorage.setItem('quibbyUserName', hostName);
         console.log('Redirecting to:', `/host/${data.roomCode}`);
-        goto(`/host/${data.roomCode}`);
+        
+        // Use window.location.href instead of goto for more reliable navigation
+        window.location.href = `/host/${data.roomCode}`;
       } else {
         console.error('No room code returned from server');
       }
@@ -64,7 +66,7 @@
   function joinRoom() {
     if (!hostName.trim()) return;
     localStorage.setItem('quibbyUserName', hostName);
-    goto('/join');
+    window.location.href = '/join';
   }
 </script>
 

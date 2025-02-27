@@ -31,6 +31,10 @@
     [key: string]: any;
   }
   
+  // Add these audio variables with your other variables
+  let waitingAudio: HTMLAudioElement;
+  let questionAudio: HTMLAudioElement;
+  
   let roomCode = $page.params.code;
   let roomStatus: 'LOBBY' | 'QUESTION' | 'ANSWERING' | 'VOTING' | 'RESULTS' = 'LOBBY';
   let players: Player[] = [];
@@ -59,7 +63,55 @@
   // Add at the top with your other variables
   let isLoading = false;
   
+  // Add a vote subscription
+  let voteSubscription: any;
+  
+  // Add this variable to your existing variables
+  let showingLeaderboard = false;
+  
+  // Add this to your variables
+  let totalLeaderboard = [];
+  
+  // Add these functions after your variable declarations but before onMount
+  function playWaitingMusic() {
+    if (waitingAudio) {
+      stopAllMusic();
+      waitingAudio.play().catch(err => console.error('Error playing waiting music:', err));
+    }
+  }
+
+  function playQuestionMusic() {
+    if (questionAudio) {
+      stopAllMusic();
+      questionAudio.play().catch(err => console.error('Error playing question music:', err));
+    }
+  }
+
+  function stopAllMusic() {
+    if (waitingAudio) {
+      waitingAudio.pause();
+      waitingAudio.currentTime = 0;
+    }
+    if (questionAudio) {
+      questionAudio.pause();
+      questionAudio.currentTime = 0;
+    }
+  }
+  
   onMount(async () => {
+    // Initialize audio elements
+    waitingAudio = new Audio('/audio/waiting.mp3');
+    questionAudio = new Audio('/audio/question.mp3');
+    
+    // Set audio to loop
+    waitingAudio.loop = true;
+    questionAudio.loop = true;
+    
+    // Start playing waiting music if in LOBBY state
+    if (roomStatus === 'LOBBY') {
+      playWaitingMusic();
+    }
+    
     // Load room data
     await fetchRoomData();
     
@@ -86,29 +138,22 @@
     if (pollingInterval) {
       clearInterval(pollingInterval);
     }
+    
+    if (voteSubscription) voteSubscription.unsubscribe();
   });
   
   async function fetchRoomData() {
     console.log('Fetching room data for room:', roomCode);
     
     try {
-      // First clear any existing data to avoid stale UI
-      if (roomStatus === 'RESULTS' && room?.status === 'ANSWERING') {
-        // We're transitioning to a new round, clear everything
-        answers = [];
-        currentQuestion = null;
-      }
-      
-      const response = await fetch(`/api/rooms/${roomCode}`);
+      const response = await fetch(`/api/rooms/${roomCode}/host-data`);
       if (!response.ok) {
-        console.error('Error fetching room data:', response.status);
+        console.error('Error fetching host data:', response.status);
         return;
       }
       
       const data = await response.json();
-      
-      // Log the raw data to check if players are included
-      console.log('Raw API response:', data);
+      console.log('Host data API response:', data);
       
       if (data.error) {
         console.error('API returned error:', data.error);
@@ -120,72 +165,92 @@
       roomStatus = data.room.status;
       currentRound = data.room.currentRound;
       
-      console.log('Room data processed. Players:', players);
+      console.log(`Room status: ${roomStatus}, Current round: ${currentRound}`);
+      console.log(`Players (${players.length}):`, players.map(p => p.name));
+      
+      // Update votes directly from the response
+      if (data.votes) {
+        votes = data.votes;
+        console.log(`Got ${votes.length} votes:`, votes);
+      }
       
       // If we have the current question data from the API
       if (data.currentQuestion) {
         currentQuestion = data.currentQuestion;
         
-        // Make sure answers has the right format for the host UI
-        answers = data.answers.map(answer => ({
-          id: answer.id,
-          text: answer.text,
-          userId: answer.userId,
-          questionId: answer.questionId,
-          votes: answer.votes || 0,
-          user: answer.user || null
-        }));
+        // Create a complete array of all possible answers
+        let allAnswers = [];
         
-        console.log('Processed answers:', answers);
-      } else if (roomStatus !== 'LOBBY') {
-        // Fallback to fetching question separately if needed
-        await fetchCurrentQuestion();
-      }
-      
-      // Calculate leaderboard if in results phase
-      if (roomStatus === 'RESULTS') {
-        // Create leaderboard from players and answers
-        leaderboard = players.map(player => {
-          // Find player's answers
-          const playerAnswers = data.allAnswers?.filter(a => a.userId === player.id) || [];
+        // 1. Process player-submitted answers
+        if (data.answers && data.answers.length > 0) {
+          const playerAnswers = data.answers.map(answer => {
+            // Count votes for this answer from the votes array
+            const voteCount = votes.filter(v => v.answerId === answer.id).length;
+            console.log(`Answer ${answer.id} by ${answer.user?.name || 'unknown'} has ${voteCount} votes`);
+            
+            return {
+              ...answer,
+              votes: voteCount,
+              source: 'player'
+            };
+          });
           
-          // Calculate votes received on player's bluffs
-          const bluffPoints = playerAnswers.reduce((sum, answer) => sum + (answer.votes * 100), 0);
-          
-          // Calculate correct votes (300 points each)
-          const correctVotes = data.votes?.filter(vote => 
-            vote.userId === player.id && 
-            data.allAnswers?.find(a => 
-              a.id === vote.answerId && 
-              a.text.toLowerCase() === a.question.correctAnswer.toLowerCase()
-            )
-          ).length || 0;
-          
-          const correctPoints = correctVotes * 300;
-          
-          return {
-            id: player.id,
-            name: player.name,
-            score: bluffPoints + correctPoints
-          };
-        });
-        
-        // Sort by score
-        leaderboard.sort((a, b) => b.score - a.score);
-      }
-      
-      // After fetching data successfully:
-      lastUpdate = Date.now();
-      
-      // After fetching answers, also fetch votes
-      if (roomStatus === 'VOTING' && currentQuestion) {
-        const votesResponse = await fetch(`/api/rooms/${roomCode}/votes`);
-        if (votesResponse.ok) {
-          const votesData = await votesResponse.json();
-          // Store votes for hasEveryoneVoted check
-          votes = votesData.votes;
+          allAnswers = [...playerAnswers];
         }
+        
+        // 2. Add AI answers if we're in voting or results phase
+        if (currentQuestion && (roomStatus === 'VOTING' || roomStatus === 'RESULTS')) {
+          // Add AI-generated incorrect alternatives
+          if (currentQuestion.alternatives && Array.isArray(currentQuestion.alternatives)) {
+            const aiDistractors = currentQuestion.alternatives.map((altText, index) => {
+              const answerId = `ai-distractor-${index}`;
+              const voteCount = votes.filter(v => v.answerId === answerId).length;
+              
+              return {
+                id: answerId,
+                text: altText,
+                votes: voteCount,
+                source: 'ai'
+              };
+            });
+            
+            allAnswers = [...allAnswers, ...aiDistractors];
+          }
+          
+          // Add the correct answer if it's not already included
+          const correctAnswerExists = allAnswers.some(
+            a => a.text.toLowerCase() === currentQuestion.correctAnswer.toLowerCase()
+          );
+          
+          if (!correctAnswerExists) {
+            const correctAnswerId = 'ai-correct';
+            const voteCount = votes.filter(v => v.answerId === correctAnswerId).length;
+            
+            allAnswers.push({
+              id: correctAnswerId,
+              text: currentQuestion.correctAnswer,
+              votes: voteCount,
+              source: 'ai'
+            });
+          }
+        }
+        
+        // 3. Shuffle answers if we're in voting phase
+        if (roomStatus === 'VOTING') {
+          allAnswers = shuffleArray([...allAnswers]);
+        }
+        
+        // Set the answers array with our complete set
+        answers = allAnswers;
+        console.log('All answers for display:', answers);
       }
+      
+      // Log the vote status
+      const nonHostPlayers = players.filter(p => p.id !== room.hostId);
+      console.log(`Need ${nonHostPlayers.length} players to vote, have ${votes.length} votes`);
+      console.log(`Has everyone voted: ${hasEveryoneVoted()}`);
+      
+      lastUpdate = Date.now();
     } catch (error) {
       console.error('Error fetching room data:', error);
     }
@@ -264,6 +329,25 @@
         console.log('Supabase subscription status:', status);
       });
     
+    // Make sure to create a dedicated vote subscription
+    voteSubscription = supabase
+      .channel('public:Vote')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'Vote'
+        },
+        (payload) => {
+          console.log('Vote change detected:', payload);
+          fetchRoomData(); // Refresh all data when a vote changes
+        }
+      )
+      .subscribe((status) => {
+        console.log('Vote subscription status:', status);
+      });
+    
     // Initial fetch
     fetchRoomData();
   }
@@ -314,24 +398,33 @@
     });
   }
   
-  // Update hasEveryoneVoted function to check localStorage
+  // Update the hasEveryoneVoted function to better count votes
   function hasEveryoneVoted() {
-    if (!players.length) return false;
+    if (!votes || !players || players.length <= 1) return false;
     
-    // Use our vote tracking to see who has voted
-    const votedPlayerIds = new Set();
+    // Get all unique players who have voted
+    const votedPlayerIds = new Set(votes.map(vote => vote.userId));
+    console.log('Players who have voted:', [...votedPlayerIds]);
+    console.log('Total players:', players.length);
     
-    // Count votes from database (for player answers)
-    for (const vote of votes) {
-      if (vote.userId) {
-        votedPlayerIds.add(vote.userId);
-      }
+    // Find the host (usually the room creator)
+    const hostPlayer = players.find(p => p.isHost || p.role === 'HOST');
+    
+    // Set the host ID if we found the host
+    if (hostPlayer) {
+      hostId = hostPlayer.id;
+      console.log('Host ID:', hostId);
     }
     
-    // Filter to just include players in the current room who aren't the host
-    const nonVotingPlayers = players.filter(p => !votedPlayerIds.has(p.id) && p.id !== hostId);
+    // Count players excluding host who haven't voted
+    const nonVotingPlayers = players.filter(p => 
+      !votedPlayerIds.has(p.id) && 
+      p.id !== hostId // Exclude host
+    );
     
-    // If everyone except the host has voted
+    console.log('Players who haven\'t voted:', nonVotingPlayers.map(p => p.name));
+    
+    // Everyone has voted if all non-host players have voted
     return nonVotingPlayers.length === 0;
   }
   
@@ -365,16 +458,27 @@
   
   // Function to show results
   async function showResults() {
+    if (isLoading) return;
+    isLoading = true;
+    
     try {
+      // First change the room status to RESULTS
       const response = await fetch(`/api/rooms/${roomCode}/show-results`, {
         method: 'POST'
       });
       
       if (!response.ok) {
-        console.error('Failed to show results');
+        throw new Error('Failed to show results');
       }
+      
+      // Then calculate scores
+      await calculateAndShowScores();
+      
     } catch (error) {
       console.error('Error showing results:', error);
+      alert('Error showing results');
+    } finally {
+      isLoading = false;
     }
   }
   
@@ -475,298 +579,449 @@
   function getCorrectAnswer() {
     return currentQuestion ? currentQuestion.correctAnswer : 'Loading answer...';
   }
+  
+  // Add or update the host's fetchGameState function to better track votes
+  async function fetchGameState() {
+    try {
+      const response = await fetch(`/api/rooms/${roomCode}/host-data`);
+      const data = await response.json();
+      
+      if (data.error) {
+        console.error('Error fetching host data:', data.error);
+        return;
+      }
+      
+      // Update game state
+      room = data.room;
+      roomStatus = room.status;
+      players = data.players;
+      
+      if (data.currentQuestion) {
+        currentQuestion = data.currentQuestion;
+        
+        // Get all answers including vote counts
+        if (data.answers) {
+          // Get votes for the current question
+          const votesForQuestion = data.votes.filter(v => 
+            data.answers.some(a => a.id === v.answerId)
+          );
+          
+          console.log(`Found ${votesForQuestion.length} votes for current question`);
+          votes = votesForQuestion;
+          
+          // Update answers with vote counts
+          answers = data.answers.map(answer => {
+            // Count votes for this answer
+            const voteCount = votes.filter(v => v.answerId === answer.id).length;
+            
+            return {
+              ...answer,
+              votes: Math.max(answer.votes || 0, voteCount) // Use the higher count
+            };
+          });
+          
+          console.log('Answers with vote counts:', answers);
+        }
+      }
+      
+      lastUpdate = Date.now();
+    } catch (error) {
+      console.error('Error fetching host data:', error);
+    }
+  }
+  
+  // Add this function to your existing script
+  async function calculateAndShowScores() {
+    isLoading = true;
+    
+    try {
+      console.log('Calculating scores for round');
+      const response = await fetch(`/api/rooms/${roomCode}/calculate-scores`, {
+        method: 'POST'
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Failed to calculate scores: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      console.log('Score calculation result:', data);
+      
+      // Update local leaderboard
+      leaderboard = data.leaderboard;
+      
+      // Show scores in the UI
+      showingLeaderboard = true;
+      
+      // Persist the scores to the database
+      if (leaderboard.length > 0) {
+        console.log('Persisting scores to database');
+        const updateResponse = await fetch(`/api/rooms/${roomCode}/update-scores`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ leaderboard })
+        });
+        
+        if (updateResponse.ok) {
+          const updateData = await updateResponse.json();
+          console.log('Scores updated successfully:', updateData);
+          
+          // You could update the leaderboard with total scores if needed
+          if (updateData.totalLeaderboard) {
+            // This will show cumulative scores
+            totalLeaderboard = updateData.totalLeaderboard;
+          }
+        } else {
+          console.error('Failed to update scores in database');
+        }
+      }
+      
+    } catch (error) {
+      console.error('Error calculating scores:', error);
+      alert('Failed to calculate scores');
+    } finally {
+      isLoading = false;
+    }
+  }
+  
+  // Add this shuffle function if it doesn't exist
+  function shuffleArray(array) {
+    for (let i = array.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [array[i], array[j]] = [array[j], array[i]];
+    }
+    return array;
+  }
 </script>
 
 <svelte:head>
   <script type="text/javascript" src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
 </svelte:head>
 
-<div class="min-h-screen bg-gradient-to-b from-blue-800 to-purple-900 p-4">
-  <div class="max-w-4xl mx-auto">
-    <div class="flex justify-between items-center mb-8">
-      <div class="flex items-center">
-        <h1 class="text-4xl font-bold text-white mr-2">Quibby</h1>
-        <div class="bg-yellow-400 text-blue-900 font-bold rounded-lg px-4 py-2 text-xl">
-          {roomCode}
+<div class="min-h-screen bg-gradient-to-b from-[#0d1557] to-[#121a40] p-4 pt-8">
+  <div class="grid grid-cols-12 gap-4 max-w-7xl mx-auto">
+    
+    <!-- Left sidebar leaderboard (millionaire money ladder style) -->
+    <div class="col-span-3">
+      <div class="bg-gradient-to-b from-[#020b43] to-[#081041] rounded-lg shadow-[0_0_15px_rgba(59,130,246,0.5)] overflow-hidden sticky top-4 border border-[#214dff]/30">
+        <div class="bg-gradient-to-r from-[#0d1763] to-[#1a237e] text-white p-4 text-center border-b border-[#4169e1]/30">
+          <h2 class="font-bold text-xl tracking-wide font-['Roboto'] text-[#f4bb3a]">LEADERBOARD</h2>
         </div>
-      </div>
-      
-      <div class="flex items-center space-x-4">
-        {#if currentRound > 0}
-          <div class="bg-white rounded-lg px-4 py-2 text-blue-800 font-bold">
-            Round {currentRound}
-          </div>
-        {/if}
-        <div id="cast-button"></div>
+        <div class="p-3">
+          {#if totalLeaderboard.length === 0}
+            <p class="text-center text-gray-400">No scores recorded yet</p>
+          {:else}
+            <div class="space-y-1.5">
+              {#each totalLeaderboard as player, index}
+                <div class="flex items-center p-2.5 rounded-lg transition-colors {
+                  index === 0 
+                    ? 'bg-gradient-to-r from-[#926f34]/20 to-[#d4af37]/20 border border-[#d4af37]/30' 
+                    : 'bg-[#1f2b77]/40'
+                }">
+                  
+                  <div class="w-8 h-8 rounded-full flex items-center justify-center font-bold mr-2.5 border {
+                    index === 0 
+                      ? 'text-[#d4af37] border-[#d4af37] bg-[#0e1344]' 
+                      : 'text-white border-blue-400 bg-[#121a60]'
+                  }">
+                    {index + 1}
+                  </div>
+                  
+                  <div class="flex-grow font-bold text-sm truncate pr-1 {
+                    index === 0 ? 'text-[#d4af37]' : 'text-blue-100'
+                  }">
+                    {player.name}
+                  </div>
+                  
+                  <div class="text-lg font-bold {
+                    index === 0 ? 'text-[#f4bb3a]' : 'text-blue-200'
+                  }">
+                    {player.totalScore}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
       </div>
     </div>
     
-    {#if roomStatus === 'LOBBY'}
-      <div class="grid md:grid-cols-2 gap-8">
-        <div class="bg-white rounded-xl shadow-lg p-8">
-          <h2 class="text-3xl font-bold text-center mb-6">Game Setup</h2>
-          
-          <button 
-            on:click={startGame}
-            disabled={players.length < 2}
-            class="w-full bg-blue-600 text-white py-3 px-6 rounded-md text-xl font-bold hover:bg-blue-700 transition-colors"
-            class:opacity-50={players.length < 2}
-          >
-            {players.length < 2 ? 'NEED MORE PLAYERS' : 'START GAME'}
-          </button>
-          
-          <div class="text-center text-sm text-gray-500 mt-2">
-            {players.length < 2 ? `At least 2 players needed (currently ${players.length})` : 'Ready to start!'}
-          </div>
-        </div>
+    <!-- Main content area (centered, wider) -->
+    <div class="col-span-8 col-start-4">
+      <div class="bg-gradient-to-b from-[#141e66] to-[#0d1352] rounded-lg shadow-[0_0_20px_rgba(59,130,246,0.6)] p-6 border border-[#214dff]/30">
+        <h1 class="text-3xl font-bold text-center text-[#f4bb3a] mb-6 tracking-wide font-['Roboto']">
+          Room Code: <span class="text-white">{roomCode}</span>
+        </h1>
         
-        <div class="bg-white rounded-xl shadow-lg p-8">
-          <h2 class="text-2xl font-bold mb-4">Players ({players.length})</h2>
-          
-          {#if players.length === 0}
-            <div class="text-center text-gray-500 py-4">
-              No players have joined yet
-            </div>
-          {:else}
-            <div class="space-y-2">
-              {#each players as player}
-                <div class="bg-blue-100 p-3 rounded-lg">
-                  <div class="font-medium text-blue-800">{player.name}</div>
-                </div>
-              {/each}
-            </div>
-          {/if}
-        </div>
-      </div>
-    {:else if roomStatus === 'QUESTION' || roomStatus === 'ANSWERING'}
-      <div class="bg-white rounded-xl shadow-lg overflow-hidden mb-8">
-        <div class="bg-blue-600 text-white p-4 text-center text-xl font-bold">
-          PLAYERS ARE ANSWERING
-        </div>
-        <div class="p-8">
-          <div class="bg-yellow-100 border-2 border-yellow-400 rounded-lg p-4 mb-6">
-            <p class="text-center text-xl font-bold text-blue-900">{getQuestionText()}</p>
-          </div>
-          
-          <div class="mb-6">
-            <h3 class="text-lg font-bold mb-3 text-blue-800">Player Answers ({answers.length}/{players.length}):</h3>
+        <!-- Keep your existing content organization but style it -->
+        {#if roomStatus === 'LOBBY'}
+          <div class="bg-gradient-to-b from-[#1a237e]/80 to-[#0d1352]/90 rounded-xl p-6 border border-[#4169e1]/20 shadow-lg">
+            <h2 class="text-2xl font-bold text-center mb-6 text-[#f4bb3a]">Waiting for Players</h2>
             
-            {#if answers.length === 0}
-              <div class="text-center text-gray-500 py-4">
-                Waiting for players to submit answers...
-              </div>
-            {:else}
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <!-- Players joining display -->
+            <div class="mb-8">
+              <h3 class="text-xl font-semibold mb-4 text-blue-200">Players ({players.length})</h3>
+              <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
                 {#each players as player}
-                  {@const hasAnswered = answers.some(a => a.userId === player.id)}
-                  <div class="bg-blue-100 p-3 rounded-lg border-2"
-                    class:border-green-500={hasAnswered}
-                    class:border-red-300={!hasAnswered}>
-                    <div class="font-medium text-blue-800">{player.name}</div>
-                    <div class="text-sm mt-1" class:text-green-600={hasAnswered} class:text-red-500={!hasAnswered}>
-                      {hasAnswered ? 'Answer submitted' : 'Not answered yet'}
-                    </div>
+                  <div class="bg-[#1e3a8a]/40 border border-blue-400/30 p-3 rounded-lg text-center text-blue-100">
+                    {player.name}
+                  </div>
+                {:else}
+                  <div class="col-span-3 text-center text-blue-300">
+                    Waiting for players to join...
                   </div>
                 {/each}
               </div>
+            </div>
+            
+            <!-- Start game button -->
+            <button 
+              on:click={startGame}
+              class="w-full bg-gradient-to-b from-[#1938a2] to-[#0c1d78] hover:from-[#1e42c0] hover:to-[#0f2290] text-white font-bold py-3 px-6 rounded-lg transition-colors shadow-lg border border-blue-500/30 disabled:opacity-50"
+              disabled={players.length < 2}
+            >
+              START GAME
+            </button>
+          </div>
+        
+        {:else if roomStatus === 'QUESTION' || roomStatus === 'ANSWERING'}
+          <!-- Question display with Millionaire styling -->
+          <div class="bg-gradient-to-b from-[#1a237e]/80 to-[#0d1352]/90 rounded-xl p-6 border border-[#4169e1]/20 shadow-lg">
+            <h2 class="text-2xl font-bold text-center mb-6 text-[#f4bb3a]">Question</h2>
+            
+            {#if currentQuestion}
+              <p class="text-center text-2xl mb-6 text-white font-['Roboto'] leading-relaxed">
+                {currentQuestion.text}
+              </p>
+              
+              <div class="flex justify-center">
+                <div class="pulse-animation w-24 h-24 rounded-full flex items-center justify-center bg-gradient-to-r from-[#1e40af] to-[#1e3a8a] border-4 border-blue-300/30">
+                  <div class="text-blue-200 text-center">
+                    <div class="text-xs uppercase tracking-wider">Players</div>
+                    <div class="text-2xl font-bold">{answers.length}</div>
+                    <div class="text-xs">of {players.length}</div>
+                  </div>
+                </div>
+              </div>
+              
+              <!-- Add this button section when all players have answered -->
+              {#if answers.length >= players.length - 1 || (answers.length > 0 && currentRound > 1)}
+                <div class="flex justify-center mt-6">
+                  <button 
+                    on:click={startVoting}
+                    class="bg-gradient-to-b from-[#1938a2] to-[#0c1d78] hover:from-[#1e42c0] hover:to-[#0f2290] text-white font-bold py-3 px-8 rounded-lg shadow-[0_0_15px_rgba(59,130,246,0.3)] border border-blue-500/30 animate-pulse"
+                  >
+                    START VOTING
+                  </button>
+                </div>
+                <p class="text-center text-blue-300 text-sm mt-3">All players have submitted their answers!</p>
+              {/if}
+            {:else}
+              <p class="text-center text-blue-300">Loading question...</p>
             {/if}
           </div>
           
-          {#if answers.length > 0}
-            <button 
-              on:click={startVoting}
-              class="w-full bg-blue-600 text-white py-3 px-6 rounded-md text-xl font-bold hover:bg-blue-700 transition-colors transform hover:scale-105 transition-transform"
-            >
-              START VOTING ({answers.length}/{players.length} answers)
-            </button>
-          {/if}
-        </div>
-      </div>
-    {:else if roomStatus === 'VOTING' && currentQuestion}
-      <div class="bg-white rounded-xl shadow-lg overflow-hidden mb-8">
-        <div class="bg-blue-600 text-white p-4 text-center text-xl font-bold">
-          VOTING IN PROGRESS
-        </div>
-        <div class="p-8">
-          {#if currentQuestion}
-            <div class="bg-yellow-100 border-2 border-yellow-400 rounded-lg p-4 mb-6">
-              <p class="text-center text-xl font-bold text-blue-900">{getQuestionText()}</p>
-            </div>
+        {:else if roomStatus === 'VOTING'}
+          <!-- Voting display with Millionaire styling -->
+          <div class="bg-gradient-to-b from-[#1a237e]/80 to-[#0d1352]/90 rounded-xl p-6 border border-[#4169e1]/20 shadow-lg">
+            <h2 class="text-2xl font-bold text-center mb-6 text-[#f4bb3a]">Time to Vote!</h2>
             
-            <!-- Show vote count as a progress bar at the top -->
-            <div class="mb-6 bg-blue-50 rounded-lg p-4 border border-blue-200">
-              <p class="text-center text-blue-800 font-bold mb-2">
-                {votes.length} of {players.length - 1} players have voted
+            {#if currentQuestion}
+              <p class="text-center text-2xl mb-8 text-white font-['Roboto'] leading-relaxed">
+                {currentQuestion.text}
               </p>
-              <div class="w-full bg-gray-200 rounded-full h-4 overflow-hidden">
-                <div class="bg-blue-600 h-4" style="width: {(votes.length / (players.length - 1) * 100) || 0}%"></div>
-              </div>
-            </div>
-            
-            <div class="mb-6">
-              <h3 class="text-lg font-bold mb-3 text-blue-800">All Answers:</h3>
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {#each [
-                  ...answers.map(answer => ({
-                    id: answer.id,
-                    text: answer.text,
-                    userId: answer.userId,
-                    user: answer.user,
-                    votes: answer.votes,
-                    isPlayerAnswer: true
-                  })),
-                  ...(currentQuestion?.alternatives || []).map((alt, i) => ({ 
-                    text: alt, 
-                    isAIAlternative: true, 
-                    id: `ai-alt-${i}` 
-                  })),
-                  { 
-                    id: 'correct', 
-                    text: getCorrectAnswer(), 
-                    isCorrect: true,
-                    isRevealed: roomStatus === 'RESULTS' // Only reveal in results phase
-                  }
-                ] as answer, index}
-                  <div class="bg-blue-100 p-4 rounded-lg text-center border-2 border-blue-300">
-                    <div class="inline-block w-8 h-8 bg-blue-600 text-white rounded-full text-center font-bold leading-8 mb-2">
-                      {String.fromCharCode(65 + index)}
-                    </div>
-                    <div class="font-bold text-lg text-blue-800">{answer.text}</div>
-                    
-                    <!-- Only show source information during RESULTS phase -->
-                    {#if roomStatus === 'RESULTS'}
-                      {#if answer.isCorrect}
-                        <div class="text-green-600 font-bold mt-1">TRUTH!</div>
-                      {:else if answer.isAIAlternative}
-                        <div class="text-yellow-600 font-bold mt-1">AI ALTERNATIVE</div>
-                      {:else if answer.isPlayerAnswer && answer.user}
-                        <div class="text-purple-600 mt-1">{answer.user.name}'s answer</div>
-                      {/if}
+              
+              <div class="space-y-4 mb-6">
+                <h3 class="text-center text-[#f4bb3a] font-bold mb-2">All Answers</h3>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {#each answers as answer}
+                    <div class="bg-gradient-to-r from-[#1e3a8a]/40 to-[#1e40af]/40 p-4 rounded-lg border border-blue-400/30 relative overflow-hidden">
+                      <div class="text-white text-center text-lg">{answer.text}</div>
                       
-                      <!-- Only show votes in results phase -->
-                      {#if answer.isPlayerAnswer}
-                        <div class="text-blue-600 font-bold mt-1">{answer.votes || 0} {answer.votes === 1 ? 'vote' : 'votes'}</div>
-                      {/if}
-                    {:else}
-                      <!-- In voting phase, just show TOTAL number of votes, not per answer -->
-                      {#if index === 0}
-                        <div class="mt-4 text-center text-blue-600 font-bold">
-                          Total votes: {votes.length} / {players.length - 1} players
-                        </div>
-                      {/if}
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-            </div>
-            
-            <div class="flex justify-center">
-              {#if hasEveryoneVoted()}
-                <button 
-                  on:click={showResults}
-                  class="mt-6 bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg text-xl transition-colors"
-                >
-                  SHOW RESULTS
-                </button>
-              {:else}
-                <div class="animate-pulse text-blue-800 font-bold">
-                  Waiting for players to vote...
-                </div>
-              {/if}
-            </div>
-          {:else}
-            <div class="text-center p-8">
-              <p class="text-red-600 font-bold">Loading question...</p>
-            </div>
-          {/if}
-        </div>
-      </div>
-    {:else if roomStatus === 'RESULTS' && currentQuestion}
-      <div class="bg-white rounded-xl shadow-lg overflow-hidden mb-8">
-        <div class="bg-blue-600 text-white p-4 text-center text-xl font-bold">
-          ROUND RESULTS
-        </div>
-        <div class="p-8">
-          {#if currentQuestion}
-            <div class="bg-yellow-100 border-2 border-yellow-400 rounded-lg p-4 mb-4">
-              <p class="text-center text-xl font-bold text-blue-900">{getQuestionText()}</p>
-            </div>
-            
-            <div class="bg-green-100 border-2 border-green-500 p-4 rounded-lg mb-6 text-center">
-              <p class="text-green-800 font-bold mb-1 text-sm">CORRECT ANSWER</p>
-              <p class="text-2xl font-bold text-blue-800">{getCorrectAnswer()}</p>
-            </div>
-            
-            <div class="space-y-4 mb-8">
-              <h3 class="text-lg font-bold text-blue-800 mb-3">Round Stats:</h3>
-              {#each answers.sort((a, b) => b.votes - a.votes) as answer}
-                <div class="flex justify-between items-center bg-blue-50 p-4 rounded-lg border-l-4"
-                  class:border-green-500={answer.text.toLowerCase() === currentQuestion.correctAnswer.toLowerCase()}
-                  class:border-blue-500={answer.text.toLowerCase() !== currentQuestion.correctAnswer.toLowerCase()}>
-                  <div>
-                    <span class="font-bold text-blue-800">{answer.text}</span>
-                    <span class="text-gray-500 text-sm"> - {answer.user?.name}</span>
-                    
-                    {#if answer.text.toLowerCase() === currentQuestion.correctAnswer.toLowerCase()}
-                      <span class="ml-2 text-green-600 font-bold">✓ TRUTH!</span>
-                    {/if}
-                  </div>
-                  <div class="text-purple-700 font-bold">
-                    {answer.votes} {answer.votes === 1 ? 'vote' : 'votes'}
-                  </div>
-                </div>
-              {/each}
-            </div>
-            
-            {#if leaderboard.length > 0}
-              <div class="mb-8">
-                <h3 class="text-lg font-bold text-blue-800 mb-3">Leaderboard:</h3>
-                <div class="bg-blue-50 rounded-lg overflow-hidden border border-blue-200">
-                  {#each leaderboard as player, index}
-                    <div class="flex items-center p-3 border-b border-blue-200 last:border-0"
-                      class:bg-yellow-50={index === 0}>
-                      <div class="w-8 text-center font-bold text-blue-800">{index + 1}</div>
-                      <div class="flex-grow font-bold text-blue-800">{player.name}</div>
-                      <div class="font-bold text-lg">{player.score}</div>
+                      <!-- Remove source labels during voting - only show text -->
                     </div>
                   {/each}
                 </div>
               </div>
+              
+              <!-- Add this voting status indicator -->
+              <div class="flex justify-center mb-8">
+                <div class="pulse-animation w-24 h-24 rounded-full flex items-center justify-center bg-gradient-to-r from-[#1e40af] to-[#1e3a8a] border-4 border-blue-300/30">
+                  <div class="text-blue-200 text-center">
+                    <div class="text-xs uppercase tracking-wider">Votes</div>
+                    <div class="text-2xl font-bold">{votes.length}</div>
+                    <div class="text-xs">of {players.length - 1}</div>
+                  </div>
+                </div>
+              </div>
+              
+              <!-- Add the Show Results button when all players have voted -->
+              {#if hasEveryoneVoted()}
+                <div class="flex justify-center mt-6">
+                  <button 
+                    on:click={showResults}
+                    class="bg-gradient-to-b from-[#1938a2] to-[#0c1d78] hover:from-[#1e42c0] hover:to-[#0f2290] text-white font-bold py-3 px-8 rounded-lg shadow-[0_0_15px_rgba(59,130,246,0.3)] border border-blue-500/30 animate-pulse"
+                  >
+                    SHOW RESULTS
+                  </button>
+                </div>
+                <p class="text-center text-blue-300 text-sm mt-3">All players have cast their votes!</p>
+              {/if}
+            {:else}
+              <p class="text-center text-blue-300">Loading question data...</p>
+            {/if}
+          </div>
+          
+        {:else if roomStatus === 'RESULTS'}
+          <!-- Results display with Millionaire styling -->
+          <div class="bg-gradient-to-b from-[#1a237e]/80 to-[#0d1352]/90 rounded-xl p-6 border border-[#4169e1]/20 shadow-lg">
+            <h2 class="text-2xl font-bold text-center mb-6 text-[#f4bb3a]">Results</h2>
+            
+            {#if currentQuestion}
+              <p class="text-center text-xl mb-4 text-white font-['Roboto'] leading-relaxed">
+                {currentQuestion.text}
+              </p>
+              
+              <p class="text-center text-2xl font-bold text-[#f4bb3a] mb-8 px-4 py-3 bg-[#0d1352] border border-[#f4bb3a]/30 rounded-lg inline-block mx-auto">
+                Correct answer: {currentQuestion.correctAnswer}
+              </p>
+              
+              <div class="space-y-4 mb-8">
+                {#each answers.sort((a, b) => b.votes - a.votes) as answer}
+                  <div class="flex justify-between items-center p-4 rounded-lg border {
+                    answer.text.toLowerCase() === currentQuestion.correctAnswer.toLowerCase()
+                      ? 'bg-gradient-to-r from-[#1e3a8a]/60 to-[#0ea5e9]/30 border-green-400/50'
+                      : 'bg-[#1e3a8a]/40 border-blue-400/30'
+                  }">
+                    <div>
+                      <span class="font-medium text-white">{answer.text}</span>
+                      
+                      <!-- Show the source ONLY in results -->
+                      {#if answer.source === 'player'}
+                        <span class="text-blue-300 text-sm ml-2">by {answer.user?.name || 'Player'}</span>
+                      {:else if answer.source === 'ai' && answer.text.toLowerCase() === currentQuestion.correctAnswer.toLowerCase()}
+                        <span class="text-green-300 text-sm ml-2">Correct Answer</span>
+                      {:else if answer.source === 'ai'}
+                        <span class="text-orange-300 text-sm ml-2">AI Distractor</span>
+                      {/if}
+                    </div>
+                    
+                    <div class="flex items-center">
+                      <div class="w-8 h-8 rounded-full bg-[#1e3a8a] flex items-center justify-center text-white font-bold mr-2 border border-blue-400/50">
+                        {answer.votes}
+                      </div>
+                      <span class="text-blue-200">votes</span>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="text-center text-blue-300">Loading results...</p>
             {/if}
             
             <div class="flex justify-center space-x-4 mt-8">
               <button 
                 on:click={startNextRound}
-                class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg transition-colors relative"
-                disabled={isLoading}
+                class="bg-gradient-to-b from-[#1938a2] to-[#0c1d78] hover:from-[#1e42c0] hover:to-[#0f2290] text-white font-bold py-3 px-6 rounded-lg transition-colors shadow-lg border border-blue-500/30"
               >
-                {#if isLoading}
-                  <span class="absolute inset-0 flex items-center justify-center">
-                    <svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                  </span>
-                  <span class="opacity-0">NEXT ROUND</span>
-                {:else}
-                  NEXT ROUND
-                {/if}
+                NEXT ROUND
               </button>
+              
+              <a 
+                href="/stats/{roomCode}"
+                class="bg-gradient-to-b from-[#6b21a8] to-[#581c87] hover:from-[#7e27c8] hover:to-[#6922a3] text-white font-bold py-3 px-6 rounded-lg inline-flex items-center transition-colors shadow-lg border border-purple-500/30"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M2 10a8 8 0 018-8v8h8a8 8 0 11-16 0z" />
+                  <path d="M12 2.252A8.014 8.014 0 0117.748 8H12V2.252z" />
+                </svg>
+                STATS
+              </a>
               
               <button 
                 on:click={endGame}
-                class="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg transition-colors"
+                class="bg-gradient-to-b from-[#9f1239] to-[#7f1d1d] hover:from-[#be123c] hover:to-[#991b1b] text-white font-bold py-3 px-6 rounded-lg transition-colors shadow-lg border border-red-500/30"
               >
                 END GAME
               </button>
             </div>
-          {:else}
-            <div class="text-center p-8">
-              <p class="text-red-600 font-bold">Loading question data...</p>
+          </div>
+        {/if}
+      </div>
+    </div>
+  </div>
+  
+  {#if showingLeaderboard}
+    <!-- Modal with Millionaire styling -->
+    <div class="fixed inset-0 bg-[#070b2e]/90 z-50 flex items-center justify-center">
+      <div class="bg-gradient-to-b from-[#141e66] to-[#0d1352] rounded-xl shadow-[0_0_30px_rgba(59,130,246,0.7)] p-8 max-w-2xl w-full mx-4 border border-[#214dff]/40">
+        <h2 class="text-3xl font-bold text-center text-[#f4bb3a] mb-6 font-['Roboto']">Round Scores</h2>
+        
+        <div class="space-y-4 mb-8">
+          {#each leaderboard as player, index}
+            <div class="flex items-center p-4 rounded-lg border-2 {
+              index === 0 
+                ? 'border-[#d4af37] bg-[#d4af37]/10' 
+                : 'border-[#1e3a8a]/40 bg-[#1e40af]/10'
+            }">
+              <div class="w-8 h-8 rounded-full bg-gradient-to-b from-[#1938a2] to-[#0c1d78] text-white flex items-center justify-center font-bold mr-4 border border-blue-400/50">
+                {index + 1}
+              </div>
+              <div class="flex-grow">
+                <div class="font-bold text-lg {index === 0 ? 'text-[#f4bb3a]' : 'text-blue-100'}">
+                  {player.name}
+                </div>
+                {#if player.details && player.details.length > 0}
+                  <div class="text-sm text-gray-400">
+                    {#each player.details as detail}
+                      {#if detail.type === 'fooled'}
+                        <div>+{detail.points} for fooling a player</div>
+                      {:else if detail.type === 'correct_guess'}
+                        <div>+{detail.points} for guessing correctly</div>
+                      {/if}
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+              <div class="text-2xl font-bold text-[#f4bb3a]">
+                +{player.score}
+              </div>
             </div>
-          {/if}
+          {/each}
+        </div>
+        
+        <div class="flex justify-center">
+          <button 
+            on:click={() => showingLeaderboard = false}
+            class="bg-gradient-to-b from-[#1938a2] to-[#0c1d78] hover:from-[#1e42c0] hover:to-[#0f2290] text-white font-bold py-3 px-6 rounded-lg shadow-lg border border-blue-500/30"
+          >
+            Close
+          </button>
         </div>
       </div>
-    {/if}
-  </div>
-</div> 
+    </div>
+  {/if}
+</div>
+
+<style>
+  /* Add pulsing animation for the waiting indicator */
+  .pulse-animation {
+    animation: pulse 2s infinite;
+  }
+  
+  @keyframes pulse {
+    0% {
+      box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7);
+    }
+    70% {
+      box-shadow: 0 0 0 15px rgba(59, 130, 246, 0);
+    }
+    100% {
+      box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+    }
+  }
+</style> 

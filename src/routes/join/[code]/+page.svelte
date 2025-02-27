@@ -196,7 +196,10 @@
       const response = await fetch(`/api/rooms/${roomCode}`);
       const data = await response.json();
       
-      if (data.error) return;
+      if (data.error) {
+        console.error('Error fetching game state:', data.error);
+        return;
+      }
       
       // Check if round has changed, if so reset state
       if (data.room.currentRound !== currentRound && currentRound !== 0) {
@@ -208,7 +211,11 @@
       currentRound = data.room.currentRound;
       roomStatus = data.room.status;
       
+      console.log(`Game state updated: room status = ${roomStatus}, round = ${currentRound}`);
+      
+      // Process game data based on room status
       if (roomStatus === 'ANSWERING' || roomStatus === 'QUESTION') {
+        // Handle answering phase...
         if (data.currentQuestion) {
           question = data.currentQuestion;
           
@@ -216,109 +223,108 @@
           if (playerAnswer) {
             userAnswer = playerAnswer.text;
             answerSubmitted = true;
-          } else {
-            answerSubmitted = false;
           }
+          
+          // Always check local storage
+          checkLocalAnswerStatus();
         }
-      } 
-      else if (roomStatus === 'VOTING') {
+      } else if (roomStatus === 'VOTING') {
+        // Handle voting phase 
         if (data.currentQuestion) {
           question = data.currentQuestion;
-          correctAnswer = data.currentQuestion.correctAnswer;
           
-          const otherAnswers = data.answers.filter(a => a.userId !== playerId);
+          console.log('Current question:', question);
+          console.log('Available answers from API:', data.answers);
           
-          const aiAlternatives = data.currentQuestion?.alternatives || [];
+          // Set up the player's own answer ID
+          const myAnswer = data.answers.find(a => a.userId === playerId);
+          if (myAnswer) {
+            console.log('Found my answer:', myAnswer);
+            playerAnswerId = myAnswer.id;
+          }
           
-          const alternativesAsAnswers = aiAlternatives.map((alt, index) => ({
-            id: `ai-alt-${index}`,
-            text: alt,
-            isAIAlternative: true
-          }));
-          
-          const allOptions = [
-            ...otherAnswers,
-            ...alternativesAsAnswers,
-            { 
-              id: 'correct', 
-              text: data.currentQuestion.correctAnswer,
-              isCorrect: true
-            }
-          ];
-          
-          if (shuffledAnswerIds.length === 0) {
-            const shuffled = shuffleArray([...allOptions]);
-            shuffledAnswerIds = shuffled.map(a => a.id);
+          // Check if we need to refresh available answers
+          const needToRefreshAnswers = 
+            availableAnswers.length === 0 || 
+            shuffledAnswerIds.length === 0;
             
-            if (!shuffled.some(a => a.isCorrect)) {
-              const correctOption = { 
-                id: 'correct', 
-                text: data.currentQuestion.correctAnswer,
-                isCorrect: true
-              };
+          if (needToRefreshAnswers) {
+            console.log('Refreshing available answers');
+            
+            // Combine player answers with correct answer and AI alternatives
+            const allAnswers = [];
+            
+            // Add all player answers (excluding the current player's)
+            if (data.answers && Array.isArray(data.answers)) {
+              console.log(`Got ${data.answers.length} player answers from API`);
+              console.log('Player answers:', data.answers);
+              console.log('Current player ID:', playerId);
               
-              const randomIndex = Math.floor(Math.random() * shuffled.length);
-              shuffled[randomIndex] = correctOption;
-              shuffledAnswerIds[randomIndex] = 'correct';
+              const otherPlayerAnswers = data.answers.filter(a => a.userId !== playerId);
+              console.log(`Found ${otherPlayerAnswers.length} answers from other players`);
+              
+              allAnswers.push(...otherPlayerAnswers.map(a => ({
+                id: a.id,
+                text: a.text,
+                userId: a.userId,
+                isPlayerAnswer: true
+              })));
             }
             
+            // Add correct answer and AI alternatives
+            if (question.correctAnswer) {
+              allAnswers.push({ 
+                id: 'correct', 
+                text: question.correctAnswer,
+                isCorrectAnswer: true
+              });
+            }
+            
+            if (question.alternatives && Array.isArray(question.alternatives)) {
+              question.alternatives.forEach((alt, i) => {
+                allAnswers.push({
+                  id: `ai-alt-${i}`,
+                  text: alt,
+                  isAiAnswer: true
+                });
+              });
+            }
+            
+            console.log('All answers before shuffle:', allAnswers);
+            
+            // Shuffle answers
+            const shuffled = shuffleAnswers(allAnswers);
+            shuffledAnswerIds = shuffled.map(a => a.id);
             availableAnswers = shuffled;
-          } else {
-            availableAnswers = shuffledAnswerIds.map(id => {
-              if (id === 'correct') {
-                return { 
-                  id: 'correct', 
-                  text: data.currentQuestion.correctAnswer,
-                  isCorrect: true
-                };
-              } else if (id.startsWith('ai-alt-')) {
-                const index = parseInt(id.split('-')[2]);
-                return {
-                  id: `ai-alt-${index}`,
-                  text: aiAlternatives[index],
-                  isAIAlternative: true
-                };
-              } else {
-                return otherAnswers.find(a => a.id === id) || {
-                  id,
-                  text: "Answer unavailable",
-                  userId: "unknown"
-                };
-              }
-            });
+            
+            console.log('Shuffled answers for voting:', availableAnswers);
           }
           
-          // Add check for existing vote in voting phase
-          const voteResponse = await fetch(`/api/rooms/${roomCode}/player-vote?userId=${playerId}`);
-          if (voteResponse.ok) {
-            const voteData = await voteResponse.json();
-            if (voteData.hasVoted) {
-              votingComplete = true;
-              votingAnswer = voteData.answerId;
-            } else {
-              votingComplete = false;
-              votingAnswer = null;
-            }
-          }
+          // Check if player has already voted
+          checkLocalVoteStatus();
         }
-      }
-      else if (roomStatus === 'RESULTS') {
+      } else if (roomStatus === 'RESULTS') {
+        // Handle results phase
         if (data.currentQuestion) {
           question = data.currentQuestion;
-          correctAnswer = data.currentQuestion.correctAnswer;
-          results = data.answers;
+          correctAnswer = question.correctAnswer;
           
-          if (!roundResults.includes(data.currentQuestion.id)) {
-            roundResults.push(data.currentQuestion.id);
+          // Process results data
+          if (data.answers) {
+            results = data.answers.map(answer => ({
+              id: answer.id,
+              text: answer.text,
+              votes: answer.votes || 0,
+              userId: answer.userId,
+              user: answer.user,
+              isCorrect: answer.text.toLowerCase() === correctAnswer.toLowerCase(),
+              isPlayerAnswer: answer.userId === playerId
+            }));
           }
         }
       }
       
-      // After processing answers, track which one belongs to this player
-      if (data.answers && Array.isArray(data.answers)) {
-        playerAnswerId = data.answers.find(a => a.userId === playerId)?.id || null;
-      }
-      
+      // Update last refresh timestamp
       lastUpdate = Date.now();
     } catch (error) {
       console.error('Error fetching game state:', error);
@@ -459,13 +465,17 @@
     }
   }
   
-  function shuffleArray(array) {
-    const newArray = [...array];
-    for (let i = newArray.length - 1; i > 0; i--) {
+  function shuffleAnswers(answers) {
+    // Create a copy of the array to avoid modifying the original
+    const shuffled = [...answers];
+    
+    // Fisher-Yates shuffle algorithm
+    for (let i = shuffled.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
     }
-    return newArray;
+    
+    return shuffled;
   }
   
   // Update your onMount or fetchGameState to check for local answer
@@ -475,12 +485,18 @@
   
   // Add this function to your script
   function isOwnAnswer(answerId) {
-    // For player answers, check if it's their own
-    // This assumes you have a mapping of answer IDs to user IDs
-    if (answerId && playerAnswerId === answerId) {
-      return true;
-    }
-    return false;
+    // Debug logging
+    console.log(`Checking if answer ${answerId} belongs to player ${playerId}`);
+    console.log(`Player's own answer ID: ${playerAnswerId}`);
+    
+    // Check if this is the player's own answer
+    if (!answerId) return false;
+    
+    // Use equality comparison
+    const isOwn = answerId === playerAnswerId;
+    console.log(`Answer ${answerId} belongs to current player: ${isOwn}`);
+    
+    return isOwn;
   }
   
   // Add a function to reset game state between rounds
@@ -616,27 +632,33 @@
           
           {#if !votingComplete}
             <div class="space-y-4">
-              {#each availableAnswers as answer, i}
-                <button 
-                  on:click={() => submitVote(answer.id)}
-                  class="w-full p-4 bg-blue-100 rounded-lg text-left border-2"
-                  class:border-blue-300={!hasVotedForCurrentQuestion}
-                  class:border-green-500={hasVotedForCurrentQuestion && votedAnswerId === answer.id}
-                  class:border-gray-300={hasVotedForCurrentQuestion && votedAnswerId !== answer.id}
-                  class:opacity-50={hasVotedForCurrentQuestion || isOwnAnswer(answer.id)}
-                  disabled={hasVotedForCurrentQuestion || isOwnAnswer(answer.id)}
-                >
-                  <div class="flex items-center">
-                    <div class="w-8 h-8 bg-blue-600 text-white rounded-full flex items-center justify-center font-bold mr-3">
-                      {String.fromCharCode(65 + i)}
+              {#if availableAnswers.length === 0}
+                <p class="text-center text-gray-500">Loading answers...</p>
+              {:else}
+                {#each availableAnswers as answer, i}
+                  <button 
+                    on:click={() => submitVote(answer.id)}
+                    class="w-full p-4 bg-blue-100 rounded-lg text-left border-2"
+                    class:border-blue-300={!hasVotedForCurrentQuestion}
+                    class:border-green-500={hasVotedForCurrentQuestion && votedAnswerId === answer.id}
+                    class:border-gray-300={hasVotedForCurrentQuestion && votedAnswerId !== answer.id}
+                    class:opacity-50={hasVotedForCurrentQuestion || isOwnAnswer(answer.id)}
+                    disabled={hasVotedForCurrentQuestion || isOwnAnswer(answer.id)}
+                    data-answer-id={answer.id}
+                    data-answer-type={answer.isPlayerAnswer ? 'player' : (answer.isCorrectAnswer ? 'correct' : 'ai')}
+                  >
+                    <div class="flex items-center">
+                      <div class="w-8 h-8 bg-blue-600 text-white rounded-full flex items-center justify-center font-bold mr-3">
+                        {String.fromCharCode(65 + i)}
+                      </div>
+                      <span class="font-medium text-blue-800">{answer.text}</span>
+                      {#if isOwnAnswer(answer.id)}
+                        <span class="ml-2 text-purple-600 text-sm">(Your answer)</span>
+                      {/if}
                     </div>
-                    <span class="font-medium text-blue-800">{answer.text}</span>
-                    {#if isOwnAnswer(answer.id)}
-                      <span class="ml-2 text-purple-600 text-sm">(Your answer)</span>
-                    {/if}
-                  </div>
-                </button>
-              {/each}
+                  </button>
+                {/each}
+              {/if}
             </div>
           {:else}
             <div class="bg-green-100 border-2 border-green-400 rounded-lg p-4 mb-6 text-center">

@@ -17,8 +17,11 @@ Format your response as valid JSON with these fields:
 - answer: the single correct answer
 - alternatives: an array of three distinct incorrect answers
 
+Make the answer alternatives as short as possible, and similar to how a human would write it under the pressure of time and on a phone.
+
 Do not wrap your response in code fences or backticks. Output valid JSON only.
 
+Do not repeat the same question, or variations of the same question. Try to make the question unique.
 
 Make sure the correct answer does not appear among the incorrect alternatives. Make the question entertaining but avoid explicit, offensive, or overly specialized content.`;
 

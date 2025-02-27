@@ -11,10 +11,12 @@ model User {
   id        String    @id @default(uuid())
   name      String
   createdAt DateTime  @default(now())
+  score     Int       @default(0)
   rooms     Room[]    @relation("RoomPlayers")
   hostRooms Room[]    @relation("RoomHost")
   answers   Answer[]
   specialVotes SpecialVote[]
+  gameScores GameScore[]
 }
 
 model Room {
@@ -29,6 +31,7 @@ model Room {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   questions     Question[]
+  gameScores    GameScore[]
 }
 
 model Question {
@@ -66,4 +69,16 @@ model SpecialVote {
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   
   @@unique([questionId, userId])
+}
+
+model GameScore {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roomId      String
+  room        Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  roundNumber Int
+  scoreValue  Int      @default(0)
+  scoreType   String   // 'correct_guess', 'fooled_player', etc.
+  createdAt   DateTime @default(now())
 } 
