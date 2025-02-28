@@ -9,7 +9,8 @@ const openai = new OpenAI({
 export async function generateQuestionFromOpenAI(category = 'general') {
   try {
     console.log(`Generating question from OpenAI for category: ${category}`);
-    
+        const prompt = 
+
 `You are a comedic fill-in-the-blank trivia generator. Generate a fun and surprising trivia question about ${category}
 with exactly one correct answer. The question should include a blank space marked as <BLANK> where the answer should go. ¨
 Include three plausible but incorrect alternatives that players might guess. The question should be playful and potentially misleading,
