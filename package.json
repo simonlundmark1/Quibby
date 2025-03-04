@@ -12,18 +12,12 @@
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
 	},
 	"files": [
-
 		"dist",
-
 		"!dist/**/*.test.*",
-
 		"!dist/**/*.spec.*"
-
 	],
 	"sideEffects": [
-
 		"**/*.css"
-
 	],
 	"svelte": "./dist/index.js",
 	"types": "./dist/index.d.ts",
