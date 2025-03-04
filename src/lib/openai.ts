@@ -10,20 +10,53 @@ export async function generateQuestionFromOpenAI(category = 'general') {
   try {
     console.log(`Generating question from OpenAI for category: ${category}`);
     
-    const prompt = `Generate a fun and interesting trivia question about ${category} with exactly one correct answer. Include three plausible but incorrect alternatives. The question should have a playful or misleading tone, similar to a bluff in a quiz game, but do not use the word "fibbage" or "correct" anywhere in the text. The question should be in the style of the game fibbage.
+    const prompt = 
+`You are a comedic fill-in-the-blank trivia generator. Generate a fun and surprising trivia question about ${category}
+with exactly one correct answer. The question should include a blank space marked as <BLANK> where the answer should go. ¨
+Include three plausible but incorrect alternatives that players might guess. The question should be playful and potentially misleading,
+similar to the game Fibbage, but do not use the word "fibbage" or "correct" anywhere in the text.
     
 Format your response as valid JSON with these fields:
-- question: a single trivia question
+- question: a fill-in-the-blank trivia question (use <BLANK> as placeholder)
 - answer: the single correct answer
-- alternatives: an array of three distinct incorrect answers
+- alternateSpellings: an array of acceptable variations of the answer
+- alternatives: an array of three distinct incorrect but plausible/funny answers
 
-Make the answer alternatives as short as possible, and similar to how a human would write it under the pressure of time and on a phone.
+Make the answer alternatives as short as possible, and similar to how a human would write it under time pressure.
 
 Do not wrap your response in code fences or backticks. Output valid JSON only.
 
-Do not repeat the same question, or variations of the same question. Try to make the question unique.
+Do not repeat the same question, or variations of the same question. Try to make the question unique, weird, amusing, or surprising.
 
-Make sure the correct answer does not appear among the incorrect alternatives. Make the question entertaining but avoid explicit, offensive, or overly specialized content.`;
+The correct answer should preferably be unusual, but verifiable and true.
+
+Example output format:
+
+{
+  "normal": [
+    {
+      "category": "ExampleCategory1",
+      "question": "In 2010, a man from Toronto claimed his pet <BLANK> could predict the weather.",
+      "answer": "pineapple",
+      "alternateSpellings": ["pine-apple","pinnapple"],
+      "suggestions": ["iguana","silver spoon","left sock","pigeon","cheese wheel"]
+    },
+    {
+      "category": "ExampleCategory2",
+      "question": "A fashion designer in Milan became famous for making hats out of <BLANK>.",
+      "answer": "casseroles",
+      "alternateSpellings": ["casserole","caseroles"],
+      "suggestions": ["suitcases","clouds","dictionary pages","pigeons","old receipts"]
+    },
+    {
+      "category": "ExampleCategory3",
+      "question": "In 1997, an award-winning ham from Nebraska was stolen by a person who insisted they were <BLANK>.",
+      "answer": "an alien on a mission",
+      "alternateSpellings": ["an alien mission","alien on a mission"],
+      "suggestions": ["the tooth fairy","a raccoon whisperer","the mayor","a secret agent","an invisible clown"]
+    }
+  ]
+}`;
 
     // Use GPT-4 to generate a question
     const response = await openai.chat.completions.create({
@@ -31,7 +64,7 @@ Make sure the correct answer does not appear among the incorrect alternatives. M
       messages: [
         {
           role: "system",
-          content: "You are a trivia question generator that creates challenging but fair questions with a clear single correct answer. The question should be in the style of the game fibbage."
+          content: "You are a humorous trivia question generator that creates fun, surprising, and challenging questions in the style of Fibbage. Each question must include a single <BLANK> where the answer goes. The answer should be unusual but verifiable, and there should be multiple funny but plausible wrong answers."
         },
         {
           role: "user",

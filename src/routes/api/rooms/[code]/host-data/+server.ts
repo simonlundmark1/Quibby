@@ -1,5 +1,6 @@
 import { json } from '@sveltejs/kit';
 import prisma from '$lib/prisma';
+import { getVotesForQuestion } from '$lib/voteTracker.js';
 
 export async function GET({ params }) {
   const { code } = params;
@@ -49,16 +50,55 @@ export async function GET({ params }) {
         }
       });
       
-      // Get all votes (using raw query for reliability)
+      // Get all votes from the centralized tracker
       try {
-        const voteResults = await prisma.$queryRaw`
-          SELECT v.id, v."userId", v."answerId", a."questionId"
-          FROM "Vote" v
-          JOIN "Answer" a ON v."answerId" = a.id
-          WHERE a."questionId" = ${currentQuestion.id}
-        `;
+        // Get votes from the in-memory tracker
+        const questionVotes = getVotesForQuestion(currentQuestion.id);
         
-        votes = voteResults;
+        if (questionVotes && questionVotes.size > 0) {
+          console.log(`Found ${questionVotes.size} votes in memory tracker for question ${currentQuestion.id}`);
+          
+          // Convert the Map entries to vote objects
+          for (const [userId, answerId] of questionVotes.entries()) {
+            if (userId) {  // Make sure userId exists
+              votes.push({
+                id: `${answerId}-${userId}`,
+                answerId,
+                userId,
+                questionId: currentQuestion.id
+              });
+              console.log(`Added vote from user ${userId} for answer ${answerId}`);
+            }
+          }
+          console.log(`Converted ${votes.length} votes from memory tracker`);
+        } else {
+          // Fallback to checking the votes stored in the Answer model
+          console.log(`No votes found in tracker, using answer.votes counts`);
+          
+          // Get answers with votes
+          const votedAnswers = await prisma.answer.findMany({
+            where: {
+              questionId: currentQuestion.id,
+              votes: { gt: 0 }
+            },
+            include: {
+              user: true
+            }
+          });
+          
+          // Create placeholder votes from the vote counts
+          for (const answer of votedAnswers) {
+            for (let i = 0; i < answer.votes; i++) {
+              votes.push({
+                id: `${answer.id}-vote-${i}`,
+                answerId: answer.id,
+                userId: null, // We don't know which user voted
+                questionId: currentQuestion.id
+              });
+            }
+          }
+          console.log(`Created ${votes.length} votes from answer.votes counts`);
+        }
       } catch (error) {
         console.error('Error fetching votes:', error);
         votes = []; // Default to empty array if query fails
@@ -77,7 +117,7 @@ export async function GET({ params }) {
     console.error('Error getting host data:', error);
     return json({ 
       error: 'Failed to get host data',
-      details: error.message
+      details: error instanceof Error ? error.message : String(error)
     }, { status: 500 });
   }
 } 

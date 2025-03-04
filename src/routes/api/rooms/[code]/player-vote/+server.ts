@@ -1,49 +1,53 @@
 import { json } from '@sveltejs/kit';
 import prisma from '$lib/prisma';
+import { hasVoted, getVotedAnswerId } from '$lib/voteTracker.js';
 
 export async function GET({ params, url }) {
   const { code } = params;
   const userId = url.searchParams.get('userId');
   
   if (!userId) {
-    return json({ error: 'Missing userId parameter' }, { status: 400 });
+    return json({ error: 'UserId is required' }, { status: 400 });
   }
   
   try {
-    // Get current question
+    // Find the room
     const room = await prisma.room.findUnique({
-      where: { code },
-      include: {
-        questions: {
-          where: {
-            roundNumber: prisma.room.findUnique({
-              where: { code },
-              select: { currentRound: true }
-            }).currentRound
-          },
-          include: {
-            answers: true
-          }
-        }
+      where: { code }
+    });
+    
+    if (!room) {
+      return json({ error: 'Room not found' }, { status: 404 });
+    }
+    
+    // Find the current question
+    const currentQuestion = await prisma.question.findFirst({
+      where: {
+        roomId: room.id,
+        roundNumber: room.currentRound
+      },
+      orderBy: {
+        createdAt: 'desc'
       }
     });
     
-    if (!room || !room.questions[0]) {
-      return json({ hasVoted: false });
+    if (!currentQuestion) {
+      return json({ error: 'No active question found' }, { status: 404 });
     }
     
-    // Look for answers that this player voted for
-    // Since we don't have a Vote table, we'll track this in a different way
-    // For now, just check if the player's client thinks they've voted (handled on client-side)
+    // Check if the user has voted using the vote tracker
+    const voted = hasVoted(currentQuestion.id, userId);
+    const answerId = voted ? getVotedAnswerId(currentQuestion.id, userId) : null;
     
-    // We can't properly check if the player has voted without a Vote table
-    // So we'll return a simpler response that just says "not voted yet"
     return json({
-      hasVoted: false,  // Default to false since we can't track this properly
-      answerId: null
+      hasVoted: voted,
+      answerId
     });
-  } catch (error) {
+  } catch (error: unknown) {
     console.error('Error checking player vote:', error);
-    return json({ error: 'Failed to check vote' }, { status: 500 });
+    return json({ 
+      error: 'Failed to check player vote',
+      details: error instanceof Error ? error.message : String(error)
+    }, { status: 500 });
   }
 } 

@@ -100,13 +100,13 @@
   
   onMount(async () => {
     // Initialize audio elements
-    waitingAudio = new Audio('/audio/waiting.mp3');
+/*     waitingAudio = new Audio('/audio/waiting.mp3');
     questionAudio = new Audio('/audio/question.mp3');
     
     // Set audio to loop
     waitingAudio.loop = true;
     questionAudio.loop = true;
-    
+ */    
     // Start playing waiting music if in LOBBY state
     if (roomStatus === 'LOBBY') {
       playWaitingMusic();
@@ -203,11 +203,20 @@
           // Add AI-generated incorrect alternatives
           if (currentQuestion.alternatives && Array.isArray(currentQuestion.alternatives)) {
             const aiDistractors = currentQuestion.alternatives.map((altText, index) => {
+              // Use both formats of AI distractor IDs to catch all votes
               const answerId = `ai-distractor-${index}`;
-              const voteCount = votes.filter(v => v.answerId === answerId).length;
+              const altAnswerId = `ai-alt-${index}`;
+              // Check votes for both ID formats
+              const voteCount = votes.filter(v => 
+                v.answerId === answerId || 
+                v.answerId === altAnswerId
+              ).length;
+              
+              console.log(`AI Distractor '${altText}': Found ${voteCount} votes`);
               
               return {
                 id: answerId,
+                altId: altAnswerId, // Store alternate ID for vote filtering
                 text: altText,
                 votes: voteCount,
                 source: 'ai'
@@ -224,10 +233,17 @@
           
           if (!correctAnswerExists) {
             const correctAnswerId = 'ai-correct';
-            const voteCount = votes.filter(v => v.answerId === correctAnswerId).length;
+            const altCorrectId = 'correct';
+            const voteCount = votes.filter(v => 
+              v.answerId === correctAnswerId || 
+              v.answerId === altCorrectId
+            ).length;
+            
+            console.log(`Correct answer '${currentQuestion.correctAnswer}': Found ${voteCount} votes`);
             
             allAnswers.push({
               id: correctAnswerId,
+              altId: altCorrectId,
               text: currentQuestion.correctAnswer,
               votes: voteCount,
               source: 'ai'
@@ -402,8 +418,11 @@
   function hasEveryoneVoted() {
     if (!votes || !players || players.length <= 1) return false;
     
-    // Get all unique players who have voted
-    const votedPlayerIds = new Set(votes.map(vote => vote.userId));
+    // Get all unique players who have voted (filtering out null values)
+    const votedPlayerIds = new Set(votes
+      .filter(vote => vote.userId !== null)
+      .map(vote => vote.userId)
+    );
     console.log('Players who have voted:', [...votedPlayerIds]);
     console.log('Total players:', players.length);
     
@@ -892,30 +911,56 @@
               
               <div class="space-y-4 mb-8">
                 {#each answers.sort((a, b) => b.votes - a.votes) as answer}
-                  <div class="flex justify-between items-center p-4 rounded-lg border {
+                  <div class="flex flex-col p-4 rounded-lg border {
                     answer.text.toLowerCase() === currentQuestion.correctAnswer.toLowerCase()
                       ? 'bg-gradient-to-r from-[#1e3a8a]/60 to-[#0ea5e9]/30 border-green-400/50'
                       : 'bg-[#1e3a8a]/40 border-blue-400/30'
                   }">
-                    <div>
-                      <span class="font-medium text-white">{answer.text}</span>
-                      
-                      <!-- Show the source ONLY in results -->
-                      {#if answer.source === 'player'}
-                        <span class="text-blue-300 text-sm ml-2">by {answer.user?.name || 'Player'}</span>
-                      {:else if answer.source === 'ai' && answer.text.toLowerCase() === currentQuestion.correctAnswer.toLowerCase()}
-                        <span class="text-green-300 text-sm ml-2">Correct Answer</span>
-                      {:else if answer.source === 'ai'}
-                        <span class="text-orange-300 text-sm ml-2">AI Distractor</span>
-                      {/if}
-                    </div>
-                    
-                    <div class="flex items-center">
-                      <div class="w-8 h-8 rounded-full bg-[#1e3a8a] flex items-center justify-center text-white font-bold mr-2 border border-blue-400/50">
-                        {answer.votes}
+                    <div class="flex justify-between items-center mb-2">
+                      <div>
+                        <span class="font-medium text-white">{answer.text}</span>
+                        
+                        <!-- Show the source ONLY in results -->
+                        {#if answer.source === 'player'}
+                          <span class="text-blue-300 text-sm ml-2">by {answer.user?.name || 'Player'}</span>
+                        {:else if answer.source === 'ai' && answer.text.toLowerCase() === currentQuestion.correctAnswer.toLowerCase()}
+                          <span class="text-green-300 text-sm ml-2">Correct Answer</span>
+                        {:else if answer.source === 'ai'}
+                          <span class="text-orange-300 text-sm ml-2">AI Distractor</span>
+                        {/if}
                       </div>
-                      <span class="text-blue-200">votes</span>
+                      
+                      <div class="flex items-center">
+                        <div class="w-8 h-8 rounded-full bg-[#1e3a8a] flex items-center justify-center text-white font-bold mr-2 border border-blue-400/50">
+                          {answer.votes}
+                        </div>
+                        <span class="text-blue-200">votes</span>
+                      </div>
                     </div>
+
+                    <!-- Add a section showing which players voted for this answer -->
+                    {#if answer.votes > 0}
+                      <div class="mt-2 pt-2 border-t border-blue-500/20">
+                        <p class="text-blue-200 text-sm mb-1">Voted by:</p>
+                        <div class="flex flex-wrap gap-1">
+                          {#each votes.filter(v => 
+                            v.answerId === answer.id || 
+                            (answer.altId && v.answerId === answer.altId)
+                          ) as vote}
+                            {#if vote.userId}
+                              {@const voter = players.find(p => p.id === vote.userId)}
+                              <span class="inline-block px-2 py-1 bg-[#1e3a8a]/60 rounded text-xs text-white">
+                                {voter ? voter.name : 'Unknown player'}
+                              </span>
+                            {:else}
+                              <span class="inline-block px-2 py-1 bg-[#1e3a8a]/60 rounded text-xs text-white">
+                                Unknown player
+                              </span>
+                            {/if}
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
                   </div>
                 {/each}
               </div>
